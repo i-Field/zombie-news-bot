@@ -45,8 +45,7 @@ export default {
         return new Response(`❌ Ошибка Telegram API: ${JSON.stringify(tgResult)}`, { status: 500 });
       }
 
-      return new Response(`Результат Telegram: ${JSON.stringify(tgResult)}`, { status: 200 });
-
+      return new Response(`Ответ от Telegram: ${JSON.stringify(tgResult)}`, { status: 200 });
 
     } catch (err) {
       return new Response(`❌ Критическая ошибка скрипта: ${err.message}`, { status: 500 });
