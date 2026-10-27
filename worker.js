@@ -10,24 +10,42 @@ export default {
 
 async function handleNewsGeneration(env) {
   try {
-    // 1. Парсим свежую новость из RSS-ленты
-    const rssUrl = "https://tproger.ru/feed/news"; // Можно заменять на любой RSS (lenta, habr, techcrunch)
-    const rssResponse = await fetch(rssUrl);
-    const xmlText = await rssResponse.text();
+    // 1. Пул тем и инфоповодов для максимального разнообразия (чтобы бот не повторялся)
+    const topics = [
+      "ИИ захватывает кофейни и увольняет бариста",
+      "Цены на видеокарты упали, но геймеры застряли в ретро-играх",
+      "Ученые создали робота-голубя, который шпионит за прохожими",
+      "Крипто-инвестор случайно купил остров в метавселенной и потерял вайб",
+      "В метро запустили вагон с бесплатным кибер-панк караоке",
+      "Новый квантовый процессор запек пиццу за две секунды",
+      "Уличные хакеры взломали билборд и запустили трансляцию старого рэпа"
+    ];
+    
+    // Выбираем случайную тему каждый раз
+    const randomTopic = topics[Math.floor(Math.random() * topics.length)];
 
-    // Быстро извлекаем заголовок первой свежей новости
-    const titleMatch = xmlText.match(/<item>[\s\S]*?<title>(.*?)<\/title>/);
-    const latestNewsTitle = titleMatch ? titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1') : "ИИ и технологии захватывают мир";
+    // 2. Список стилей, чтобы тексты и рифмы всегда были разными
+    const styles = [
+      "Агрессивный андерграунд-рэп с тяжелым басом",
+      "Киберпанк-читка с упором на технологии и баги",
+      "Ироничный бум-бэп старой школы с уличным сленгом",
+      "Мрачный зомби-мотив с черным юмором"
+    ];
+    const randomStyle = styles[Math.floor(Math.random() * styles.length)];
 
-    // 2. Промпт для Gemini: Сделать диалог двух персонажей по РЕАЛЬНОЙ новости
+    // 3. Промпт для Gemini с четким разделением ролей
     const prompt = `
-Ты — сценарист рэп-баттла. На основе реальной новости: "${latestNewsTitle}", напиши короткий дерзкий диалог (рэп-фит) двух персонажей для Telegram-поста.
+Ты — генератор контента для уличного рэп-радио. 
+Используй тему: "${randomTopic}".
+Музыкальный вайб/стиль: "${randomStyle}".
 
-Персонажи:
-🧟‍♂️ Zombie-DJ (Новости): зачитывает панч про новость (2-3 строки).
-🤖 Cyber-MC (Оппонент): дерзко подхватывает, спорит или дорисовывает картину (2-3 строки).
+Напиши короткий, качающий рэп-диалог (фит) двух персонажей. Никаких шаблонных фраз вроде "мозги кипят", только живые рифмы!
 
-Используй эмодзи, рифмы, зомби/киберпанк сленг. Пост должен быть коротким и сочным!
+Формат ответа (строго соблюдай имена):
+🧟‍♂️ **Zombie-DJ:** [Текст куплета или панча на 2-3 строки, рифмованный рэп]
+🤖 **Cyber-MC:** [Ответный панч, ирония или развитие темы на 2-3 строки, рифмованный рэп]
+
+Используй эмодзи. Текст должен быть бодрым, дерзким и уникальным!
 `;
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
@@ -42,10 +60,10 @@ async function handleNewsGeneration(env) {
     const geminiData = await geminiResponse.json();
     const rapText = geminiData.candidates[0].content.parts[0].text;
 
-    // Формируем итоговое сообщение с указанием инфоповода
-    const finalPost = `📰 **Главный инфоповод:** ${latestNewsTitle}\n\n${rapText}`;
+    // Собираем итоговое сообщение
+    const finalPost = `🎙 **Трек часа / Тема:** ${randomTopic}\n⚡️ **Стиль:** ${randomStyle}\n\n${rapText}`;
 
-    // 3. Отправка в Telegram
+    // 4. Отправка в Telegram
     const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
     const tgResponse = await fetch(tgUrl, {
       method: "POST",
@@ -57,7 +75,7 @@ async function handleNewsGeneration(env) {
       })
     });
 
-    return new Response("🤖 Пост с живой новостью и диалогом отправлен!", { status: 200 });
+    return new Response("🤖 Разнообразный рэп-баттл успешно отправлен!", { status: 200 });
 
   } catch (err) {
     return new Response(`Ошибка: ${err.message}`, { status: 500 });
