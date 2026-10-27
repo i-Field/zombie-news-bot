@@ -10,7 +10,6 @@ export default {
 
 async function handleNewsGeneration(env) {
   try {
-    // Список разнообразных тем для диалога
     const topics = [
       "ИИ захватил кофейни и увольняет бариста за медленный вайб",
       "Цены на видеокарты упали в ноль, но геймеры застряли в ретро-играх",
@@ -23,7 +22,6 @@ async function handleNewsGeneration(env) {
     
     const currentTopic = topics[Math.floor(Math.random() * topics.length)];
 
-    // Пул классных картинок (киберпанк, неок, роботы) из открытых источников
     const images = [
       "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=800",
       "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800",
@@ -57,7 +55,6 @@ async function handleNewsGeneration(env) {
 
     const finalPost = `🎧 **Тема часа:** ${currentTopic}\n\n${rapText}`;
 
-    // Отправляем фото с текстом в качестве подписи (caption) через метод sendPhoto
     const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
     const tgResponse = await fetch(tgUrl, {
       method: "POST",
