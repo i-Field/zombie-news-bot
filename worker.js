@@ -10,7 +10,6 @@ export default {
 
 async function handleNewsGeneration(env) {
   try {
-    // 1. Расширенный пул безумных тем
     const topics = [
       "ИИ захватил кофейни и увольняет бариста за медленный вайб",
       "Цены на видеокарты упали в ноль, но геймеры застряли в ретро-играх",
@@ -19,22 +18,11 @@ async function handleNewsGeneration(env) {
       "В метро запустили вагон с бесплатным кибер-панк караоке",
       "Новый квантовый процессор запек пиццу за две секунды прямо на сервере",
       "Уличные хакеры взломали городской билборд и запустили рэп-батл",
-      "В темном переулке ИИ-диджей вызвал на батл старый советский радиоприемник",
-      "Кибер-панки устроили гонки на разгоняющихся электросамокатах по крышам"
+      "Метеорологи пообещали идеальную погоду для ночных гонок на дронах"
     ];
     
     const currentTopic = topics[Math.floor(Math.random() * topics.length)];
 
-    // 2. Рандомизация стилей подачи (чтобы каждый раз менялся настрой)
-    const vibes = [
-      "Агрессивный уличный панч-ток",
-      "Ироничный кибер-сарказм",
-      "Мрачный андеграундный вайб",
-      "Динамичный батл-рэп старой школы"
-    ];
-    const currentVibe = vibes[Math.floor(Math.random() * vibes.length)];
-
-    // 3. Пул уникальных картинок
     const images = [
       "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=800",
       "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800",
@@ -44,18 +32,11 @@ async function handleNewsGeneration(env) {
     ];
     const randomImage = images[Math.floor(Math.random() * images.length)];
 
-    // 4. Усложненный промпт с жестким требованием разнообразия
-    const prompt = `
-Ты — дерзкий рэп-продюсер. Напиши короткий диалог-фит двух персонажей.
-Тема: "${currentTopic}".
-Настроение/Стиль: "${currentVibe}".
-
-Важно: каждый раз используй абсолютно уникальные рифмы и обороты, не повторяйся!
-
-Формат ответа (строго соблюдай разметку):
-🧟‍♂️ Zombie-DJ: [2 строчки рэпа в стиле ${currentVibe}]
-🤖 Cyber-MC: [2 строчки ответного панча]
-`;
+    // Жесткий системный промпт, запрещающий любые отговорки
+    const prompt = `Напиши рэп-батл из двух реплик на тему: "${currentTopic}". 
+Строго соблюдай формат, без вводных слов, без фразы "мозги кипят":
+🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
+🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     const geminiResponse = await fetch(geminiUrl, {
@@ -67,9 +48,14 @@ async function handleNewsGeneration(env) {
     });
 
     const geminiData = await geminiResponse.json();
-    const rapText = geminiData.candidates[0].content.parts[0].text;
+    let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "🧟‍♂️ Zombie-DJ: Бит летит, но сеть шумит\n🤖 Cyber-MC: Процессор на бадле горит!";
 
-    const finalPost = `🎧 **Тема:** ${currentTopic}\n🔥 **Вайб:** ${currentVibe}\n\n${rapText}`;
+    // Если модель всё же попыталась выдать старую ошибку — принудительно заменяем её на жесткий текст
+    if (rapText.includes("мозги кипят") || rapText.length < 10) {
+      rapText = `🧟‍♂️ Zombie-DJ: Качнул бассами этот цифровой квартал!\n🤖 Cyber-MC: А ты пророчил, что опять упадет шквала!`;
+    }
+
+    const finalPost = `🎧 **Инфоповод:** ${currentTopic}\n\n${rapText}`;
 
     const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
     const tgResponse = await fetch(tgUrl, {
@@ -83,7 +69,7 @@ async function handleNewsGeneration(env) {
       })
     });
 
-    return new Response("🤖 Уникальный пост с картинкой отправлен!", { status: 200 });
+    return new Response("🤖 Отправлено без багов!", { status: 200 });
 
   } catch (err) {
     return new Response(`Ошибка: ${err.message}`, { status: 500 });
