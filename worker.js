@@ -23,6 +23,16 @@ async function handleNewsGeneration(env) {
     
     const currentTopic = topics[Math.floor(Math.random() * topics.length)];
 
+    // Пул классных картинок (киберпанк, неок, роботы) из открытых источников
+    const images = [
+      "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=800",
+      "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800",
+      "https://images.unsplash.com/photo-1563089145-599997674d42?w=800",
+      "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=800",
+      "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800"
+    ];
+    const randomImage = images[Math.floor(Math.random() * images.length)];
+
     const prompt = `
 Ты — рэп-продюсер. Напиши короткий диалог-фит для двух персонажей по теме: "${currentTopic}".
 
@@ -47,18 +57,20 @@ async function handleNewsGeneration(env) {
 
     const finalPost = `🎧 **Тема часа:** ${currentTopic}\n\n${rapText}`;
 
-    const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+    // Отправляем фото с текстом в качестве подписи (caption) через метод sendPhoto
+    const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
     const tgResponse = await fetch(tgUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: env.TELEGRAM_CHAT_ID,
-        text: finalPost,
+        photo: randomImage,
+        caption: finalPost,
         parse_mode: "Markdown"
       })
     });
 
-    return new Response("🤖 Успешно отправлен новый диалог!", { status: 200 });
+    return new Response("🤖 Пост с картинкой и диалогом отправлен!", { status: 200 });
 
   } catch (err) {
     return new Response(`Ошибка: ${err.message}`, { status: 500 });
