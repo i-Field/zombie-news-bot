@@ -1,4 +1,4 @@
-export default { 
+export default {
   async fetch(request, env, ctx) {
     return await handleNewsGeneration(env);
   },
@@ -10,57 +10,47 @@ export default {
 
 async function handleNewsGeneration(env) {
   try {
-    // === БЛОК 1: Получаем свежий заголовок из Reddit JSON ===
-    const feeds = [
-      "https://www.reddit.com/r/technology/top/.json?limit=15&t=day",
-      "https://www.reddit.com/r/robotics/top/.json?limit=15&t=day",
-      "https://www.reddit.com/r/artificial/top/.json?limit=15&t=day"
-    ];
-
+    // === БЛОК 1: Получаем свежий заголовок из Hacker News ===
     let currentTopic = null;
     let newsLink = null;
 
-    // Перемешиваем ленты, чтобы бот не залипал на одном источнике
-    const shuffled = [...feeds].sort(() => Math.random() - 0.5);
+    try {
+      // 1. Получаем список ID топовых новостей
+      const topStoriesRes = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json");
+      const storyIds = await topStoriesRes.json();
 
-    for (const feedUrl of shuffled) {
-      try {
-        const res = await fetch(feedUrl, {
-          headers: { "User-Agent": "zombie-news-bot/1.0 (by /u/zombie_news_bot)" }
-        });
-        if (!res.ok) continue;
+      // Берем первые 20 новостей (самые свежие)
+      const recentIds = storyIds.slice(0, 20);
 
-        const data = await res.json();
-        const posts = data?.data?.children || [];
+      for (const id of recentIds) {
+        const key = `sent:hn_${id}`;
+        const alreadySent = await env.NEWS_KV.get(key);
 
-        for (const post of posts) {
-          const title = post?.data?.title;
-          const permalink = post?.data?.permalink;
-          if (!title || !permalink) continue;
+        if (!alreadySent) {
+          // 2. Получаем заголовок и ссылку конкретной новости
+          const itemRes = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+          const item = await itemRes.json();
 
-          const key = `sent:${permalink}`;
-          const alreadySent = await env.NEWS_KV.get(key);
-          if (!alreadySent) {
-            currentTopic = title;
-            newsLink = `https://www.reddit.com${permalink}`;
-            // Сохраняем сразу, чтобы при следующем запуске не взяли это же
+          if (item && item.title) {
+            currentTopic = item.title;
+            newsLink = item.url || `https://news.ycombinator.com/item?id=${id}`;
+
+            // 3. Сразу сохраняем в базу, чтобы не повторяться
             await env.NEWS_KV.put(key, "1");
-            break;
+            break; // Нашли новую новость — выходим из цикла
           }
         }
-        if (currentTopic) break;
-      } catch (feedErr) {
-        // Пропускаем сломанную ленту, идём к следующей
-        continue;
       }
+    } catch (e) {
+      console.error("Ошибка HN API:", e);
     }
 
-    // Если всё уже отправлено — тихо выходим, не спамим канал
+    // Если всё уже отправлено или произошла ошибка
     if (!currentTopic) {
       return new Response("📭 Нет новых тем для публикации.", { status: 200 });
     }
 
-    // === БЛОК 2: Картинки (ваш оригинальный пул) ===
+    // === БЛОК 2: Картинки ===
     const images = [
       "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=800",
       "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800",
@@ -70,7 +60,7 @@ async function handleNewsGeneration(env) {
     ];
     const randomImage = images[Math.floor(Math.random() * images.length)];
 
-    // === БЛОК 3: Промпт для Gemini (опирается на реальный заголовок) ===
+    // === БЛОК 3: Промпт для Gemini ===
     const prompt = `Напиши рэп-батл из двух реплик на тему реальной новости: "${currentTopic}".
 Опирайся на суть заголовка, но стилизуй под киберпанк-баттл зомби-диджея и киборга.
 Строго соблюдай формат, без вводных слов, без фразы "мозги кипят":
@@ -90,7 +80,6 @@ async function handleNewsGeneration(env) {
     let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ||
       "🧟‍♂️ Zombie-DJ: Бит летит, но сеть шумит\n🤖 Cyber-MC: Процессор на бадле горит!";
 
-    // Защита от пустого/сломанного ответа
     if (rapText.includes("мозги кипят") || rapText.length < 10) {
       rapText = `🧟‍♂️ Zombie-DJ: Сигнал в эфире, биты гремят!\n🤖 Cyber-MC: Зомби и киборг снова в ряд!`;
     }
