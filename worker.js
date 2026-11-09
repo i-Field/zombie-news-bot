@@ -68,20 +68,34 @@ async function handleNewsGeneration(env) {
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    
     const geminiResponse = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
+        contents: [{ parts: [{ text: prompt }] }],
+        // Отключаем жесткие фильтры Google, чтобы они не блокировали "зомби" и "баттл"
+        safetySettings: [
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+        ]
       })
     });
 
     const geminiData = await geminiResponse.json();
-    let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "🧟‍♂️ Zombie-DJ: Бит летит, но сеть шумит\n🤖 Cyber-MC: Процессор на бадле горит!";
+    
+    // Добавляем лог, чтобы в случае ошибки мы видели её причину в Cloudflare
+    if (!geminiData.candidates || !geminiData.candidates[0]?.content) {
+      console.error("ОШИБКА GEMINI:", JSON.stringify(geminiData));
+    }
 
-    if (rapText.includes("мозги кипят") || rapText.length < 10) {
-      rapText = `🧟‍♂️ Zombie-DJ: Сигнал в эфире, биты гремят!\n🤖 Cyber-MC: Зомби и киборг снова в ряд!`;
+    let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    // Если Gemini вернул пустоту, ставим заглушку
+    if (!rapText || rapText.length < 10) {
+      rapText = `🧟‍♂️ Zombie-DJ: Ошибка в нейросети, но бит не утих!\n🤖 Cyber-MC: Проверь API-ключ, пока я не затих!`;
     }
 
     // === БЛОК 4: Формируем пост со ссылкой на источник ===
