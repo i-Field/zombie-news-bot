@@ -60,21 +60,21 @@ async function handleNewsGeneration(env) {
     ];
     const randomImage = images[Math.floor(Math.random() * images.length)];
 
-    // === БЛОК 3: Промпт для Gemini ===
+    // === БЛОК 3: Промпт для Gemini (используем модель 2.0 Flash) ===
     const prompt = `Напиши рэп-батл из двух реплик на тему реальной новости: "${currentTopic}".
 Опирайся на суть заголовка, но стилизуй под киберпанк-баттл зомби-диджея и киборга.
 Строго соблюдай формат, без вводных слов, без фразы "мозги кипят":
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const geminiResponse = await fetch(geminiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        // Отключаем жесткие фильтры Google, чтобы они не блокировали "зомби" и "баттл"
+        // Отключаем жесткие фильтры Google
         safetySettings: [
           { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
           { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -86,20 +86,30 @@ async function handleNewsGeneration(env) {
 
     const geminiData = await geminiResponse.json();
     
-    // Добавляем лог, чтобы в случае ошибки мы видели её причину в Cloudflare
+    // Логи для отладки (если Gemini снова заупрямится, мы увидим почему)
+    console.log("Статус Gemini:", geminiResponse.status);
     if (!geminiData.candidates || !geminiData.candidates[0]?.content) {
       console.error("ОШИБКА GEMINI:", JSON.stringify(geminiData));
     }
 
     let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    // Если Gemini вернул пустоту, ставим заглушку
+    // Если Gemini вернул пустоту или ошибку
     if (!rapText || rapText.length < 10) {
       rapText = `🧟‍♂️ Zombie-DJ: Ошибка в нейросети, но бит не утих!\n🤖 Cyber-MC: Проверь API-ключ, пока я не затих!`;
     }
 
-    // === БЛОК 4: Формируем пост со ссылкой на источник ===
-    const finalPost = `🎧 **Инфоповод:** ${currentTopic}\n🔗 [Источник](${newsLink})\n\n${rapText}`;
+    // === БЛОК 4: Формируем пост (безопасно для Telegram HTML) ===
+    // Очищаем заголовок и рэп от символов < и >, чтобы не сломать HTML-разметку
+    const safeTitle = currentTopic.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let safeRap = rapText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    
+    // Обрезаем текст, чтобы точно влезть в лимит 1024 символа (для фото)
+    if (safeRap.length > 700) {
+      safeRap = safeRap.substring(0, 700) + "...";
+    }
+    
+    const finalPost = `🎧 <b>Инфоповод:</b> ${safeTitle}\n🔗 <a href="${newsLink}">Источник</a>\n\n${safeRap}`;
 
     // === БЛОК 5: Отправка в Telegram ===
     const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
@@ -110,13 +120,27 @@ async function handleNewsGeneration(env) {
         chat_id: env.TELEGRAM_CHAT_ID,
         photo: randomImage,
         caption: finalPost,
-        parse_mode: "Markdown"
+        parse_mode: "HTML"
       })
     });
 
+    // Если Telegram отклонил фото — шлем просто текст (бот не будет молчать)
     if (!tgResponse.ok) {
       const errText = await tgResponse.text();
-      return new Response(`Telegram error: ${errText}`, { status: 500 });
+      console.error("Ошибка sendPhoto:", errText);
+      
+      const tgTextUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+      await fetch(tgTextUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: env.TELEGRAM_CHAT_ID,
+          text: finalPost,
+          parse_mode: "HTML",
+          disable_web_page_preview: false
+        })
+      });
+      return new Response("⚠️ Фото не ушло, отправлен только текст", { status: 200 });
     }
 
     return new Response("🤖 Отправлено без багов!", { status: 200 });
