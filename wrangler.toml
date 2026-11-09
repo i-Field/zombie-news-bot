@@ -2,7 +2,6 @@ name = "zombie-news-bot"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
-# KV для запоминания уже отправленных новостей
 [[kv_namespaces]]
 binding = "NEWS_KV"
 id = "6ba25c8c3d8f46208ab6c2e067013362"
