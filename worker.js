@@ -60,8 +60,7 @@ async function handleNewsGeneration(env) {
     const randomSeed = Math.floor(Math.random() * 100000);
     const randomImage = `https://image.pollinations.ai/prompt/cyberpunk,zombie,neon,robot?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
-    // === БЛОК 3: Gemini ===
-    // Проверяем, вообще есть ли ключ
+    // === БЛОК 3: Gemini (актуальная модель 3.8-flash) ===
     if (!env.GEMINI_API_KEY) {
       await sendDebug(env, "КРИТИЧЕСКАЯ ОШИБКА: Переменная GEMINI_API_KEY пуста!");
       return new Response("Нет ключа", { status: 500 });
@@ -73,32 +72,30 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    await sendDebug(env, "Стучусь в Gemini (модель 2.5-flash)...");
+    await sendDebug(env, "Стучусь в Gemini (модель 3.8-flash)...");
     
-    // Используем самую стабильную модель и добавляем таймаут (10 сек)
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     let geminiData = null;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // Таймаут 10 секунд
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // Таймаут 15 секунд
 
       const geminiResponse = await fetch(geminiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: controller.signal, // Привязываем таймаут
+        signal: controller.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.9 }
         })
       });
       
-      clearTimeout(timeoutId); // Отменяем таймер, если ответ пришел
+      clearTimeout(timeoutId);
       geminiData = await geminiResponse.json();
       
     } catch (error) {
-      // Если сработал таймаут или сеть упала
-      await sendDebug(env, `СБОЙ СВЯЗИ С GEMINI: ${error.message}. Ключ неверный или Google блокирует запрос.`);
+      await sendDebug(env, `СБОЙ СВЯЗИ С GEMINI: ${error.message}. Проверьте ключ или соединение.`);
       return new Response(`Ошибка Gemini: ${error.message}`, { status: 500 });
     }
 
