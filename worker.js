@@ -45,11 +45,10 @@ async function handleNewsGeneration(env) {
 
     // === БЛОК 2: Генерация картинки через нейросеть ===
     const randomSeed = Math.floor(Math.random() * 100000);
-    // Упростили промпт, чтобы генерация проходила быстрее
     const promptForImage = "cyberpunk,zombie,neon,robot";
     const randomImage = `https://image.pollinations.ai/prompt/${promptForImage}?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
-    // === БЛОК 3: Промпт для Gemini с рандомизацией стиля ===
+    // === БЛОК 3: Промпт для Gemini (Модель 3.8 Flash) ===
     const styles = [
       "в стиле агрессивного дрилла", 
       "в стиле олдскульного хип-хопа 90-х", 
@@ -66,7 +65,8 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+    // ОБНОВЛЕНО: Используем модель gemini-3.8-flash
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const geminiResponse = await fetch(geminiUrl, {
       method: "POST",
@@ -91,11 +91,11 @@ async function handleNewsGeneration(env) {
     
     let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    // 🚨 РЕНТГЕН: Если Gemini вернул ошибку, мы выводим её ПРЯМО В ТЕЛЕГРАМ
+    // Если Gemini вернул ошибку, показываем её читаемым текстом (без сырых HTML-тегов)
     if (!rapText || rapText.length < 10) {
-      // Берем первые 300 символов ошибки, чтобы влезло в пост
       const errorDetails = JSON.stringify(geminiData).substring(0, 300); 
-      rapText = `🚨 <b>ОШИБКА API!</b>\nВот что ответил Google:\n<code>${errorDetails}</code>`;
+      const safeError = errorDetails.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      rapText = `🚨 ОШИБКА API!\nВот что ответил Google:\n${safeError}`;
     }
 
     // === БЛОК 4: Формируем пост ===
@@ -125,8 +125,7 @@ async function handleNewsGeneration(env) {
       const errText = await tgResponse.text();
       console.error("Ошибка sendPhoto:", errText);
       
-      // Если картинка от нейросети не загрузилась, отправляем ТЕКСТ
-      // Отключаем огромные превью ссылок, чтобы канал выглядел чисто
+      // Если картинка не загрузилась, отправляем просто текст (без превью)
       const tgTextUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
       await fetch(tgTextUrl, {
         method: "POST",
@@ -135,10 +134,10 @@ async function handleNewsGeneration(env) {
           chat_id: env.TELEGRAM_CHAT_ID,
           text: finalPost,
           parse_mode: "HTML",
-          disable_web_page_preview: true // <--- Отключаем огромные картинки со ссылок
+          disable_web_page_preview: true 
         })
       });
-      return new Response("⚠️ Картинка от нейросети не загрузилась, отправлен текст с ошибкой (если она есть)", { status: 200 });
+      return new Response("⚠️ Картинка не загрузилась, отправлен текст", { status: 200 });
     }
 
     return new Response("🤖 Отправлено без багов!", { status: 200 });
