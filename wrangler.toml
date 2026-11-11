@@ -2,8 +2,16 @@ name = "zombie-news-bot"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
+# Привязка базы данных для запоминания новостей
 [[kv_namespaces]]
 binding = "NEWS_KV"
 id = "6ba25c8c3d8f46208ab6c2e067013362"
+
+# Включаем логи
 [observability]
 enabled = true
+
+# Расписание: запуск 2 раза в день (в 9:00 и 21:00 по UTC)
+# Это примерно 11:00 и 23:00 по Киеву/Москве
+[triggers]
+crons = ["0 9,21 * * *"]
