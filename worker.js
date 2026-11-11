@@ -8,7 +8,7 @@ export default {
   }
 };
 
-// Функция для отправки логов прямо в Telegram
+// Отправка логов прямо в Telegram
 async function sendDebug(env, text) {
   try {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -30,7 +30,7 @@ async function handleNewsGeneration(env) {
     try {
       const topStoriesRes = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json");
       const storyIds = await topStoriesRes.json();
-      const recentIds = storyIds.slice(0, 50);
+      const recentIds = storyIds.slice(0, 50); // Проверяем 50 новостей
 
       for (const id of recentIds) {
         const key = `sent:hn_${id}`;
@@ -43,7 +43,7 @@ async function handleNewsGeneration(env) {
           if (item && item.title) {
             currentTopic = item.title;
             newsLink = item.url || `https://news.ycombinator.com/item?id=${id}`;
-            await env.NEWS_KV.put(key, "1");
+            await env.NEWS_KV.put(key, "1"); // Сохраняем в базу
             await sendDebug(env, `Найдена тема: "${currentTopic}"`);
             break; 
           }
@@ -54,6 +54,7 @@ async function handleNewsGeneration(env) {
     }
 
     if (!currentTopic) {
+      await sendDebug(env, "Все новости из списка уже были отправлены ранее.");
       return new Response("📭 Нет новых тем.", { status: 200 });
     }
 
@@ -84,13 +85,13 @@ async function handleNewsGeneration(env) {
         await sendDebug(env, `Стучусь в Gemini (попытка ${attempt} из ${MAX_RETRIES})...`);
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // Ждем до 30 секунд
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // Ждем 30 секунд
 
         const response = await fetch(geminiUrl, {
           method: "POST",
           headers: { 
             "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY // Безопасная передача ключа
+            "x-goog-api-key": env.GEMINI_API_KEY 
           },
           signal: controller.signal,
           body: JSON.stringify({
@@ -107,16 +108,15 @@ async function handleNewsGeneration(env) {
           
           if (rapText && rapText.length > 10) {
             await sendDebug(env, "Успех! Gemini выдал рэп.");
-            break; // Выходим из цикла, так как получили текст
+            break; 
           } else {
             lastError = "Gemini вернул пустой ответ.";
           }
         } else if (response.status === 503 || response.status === 429) {
           lastError = `Сервер Google перегружен (Код ${response.status}). Ждем...`;
           await sendDebug(env, lastError);
-          await new Promise(r => setTimeout(r, 2000)); // Ждем 2 сек перед повтором
+          await new Promise(r => setTimeout(r, 3000)); // Ждем 3 сек перед повтором
         } else {
-          // Ошибки 400, 404 нет смысла повторять
           const errData = await response.text();
           lastError = `Код ${response.status}: ${errData.substring(0, 150)}`;
           break; 
