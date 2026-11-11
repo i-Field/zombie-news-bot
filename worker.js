@@ -73,7 +73,7 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    await sendDebug(env, "Стучусь в Gemini (модель 1.5-flash)...");
+    await sendDebug(env, "Стучусь в Gemini (модель 2.5-flash)...");
     
     // Используем самую стабильную модель и добавляем таймаут (10 сек)
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
