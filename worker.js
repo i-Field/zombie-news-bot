@@ -43,21 +43,19 @@ async function handleNewsGeneration(env) {
       return new Response("📭 Нет новых тем для публикации.", { status: 200 });
     }
 
-    // === БЛОК 2: Бесконечные картинки от Pollinations.ai ===
+    // === БЛОК 2: Генерация картинки через нейросеть ===
     const randomSeed = Math.floor(Math.random() * 100000);
-    // Генерируем картинку по промпту: киберпанк, зомби, неон
-    const promptForImage = "cyberpunk,zombie,neon,glitch,robot,dj";
+    // Упростили промпт, чтобы генерация проходила быстрее
+    const promptForImage = "cyberpunk,zombie,neon,robot";
     const randomImage = `https://image.pollinations.ai/prompt/${promptForImage}?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
     // === БЛОК 3: Промпт для Gemini с рандомизацией стиля ===
-    // Добавляем случайный стиль, чтобы Gemini не повторялся
     const styles = [
       "в стиле агрессивного дрилла", 
       "в стиле олдскульного хип-хопа 90-х", 
       "в стиле мрачного киберпанк-трэпа", 
       "с легким безумием и быстрым флоу", 
-      "философски и мрачно", 
-      "как на подпольном рэп-батле в подвале"
+      "философски и мрачно"
     ];
     const randomStyle = styles[Math.floor(Math.random() * styles.length)];
 
@@ -75,7 +73,6 @@ async function handleNewsGeneration(env) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        // Повышаем креативность (temperature), чтобы ответы были разными
         generationConfig: {
           temperature: 0.9,
           topK: 40,
@@ -92,14 +89,13 @@ async function handleNewsGeneration(env) {
 
     const geminiData = await geminiResponse.json();
     
-    if (!geminiData.candidates || !geminiData.candidates[0]?.content) {
-      console.error("ОШИБКА GEMINI:", JSON.stringify(geminiData));
-    }
-
     let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
     
+    // 🚨 РЕНТГЕН: Если Gemini вернул ошибку, мы выводим её ПРЯМО В ТЕЛЕГРАМ
     if (!rapText || rapText.length < 10) {
-      rapText = `🧟‍♂️ Zombie-DJ: Ошибка в нейросети, но бит не утих!\n🤖 Cyber-MC: Проверь API-ключ, пока я не затих!`;
+      // Берем первые 300 символов ошибки, чтобы влезло в пост
+      const errorDetails = JSON.stringify(geminiData).substring(0, 300); 
+      rapText = `🚨 <b>ОШИБКА API!</b>\nВот что ответил Google:\n<code>${errorDetails}</code>`;
     }
 
     // === БЛОК 4: Формируем пост ===
@@ -129,7 +125,8 @@ async function handleNewsGeneration(env) {
       const errText = await tgResponse.text();
       console.error("Ошибка sendPhoto:", errText);
       
-      // Если картинка не загрузилась, отправляем просто текст
+      // Если картинка от нейросети не загрузилась, отправляем ТЕКСТ
+      // Отключаем огромные превью ссылок, чтобы канал выглядел чисто
       const tgTextUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
       await fetch(tgTextUrl, {
         method: "POST",
@@ -138,10 +135,10 @@ async function handleNewsGeneration(env) {
           chat_id: env.TELEGRAM_CHAT_ID,
           text: finalPost,
           parse_mode: "HTML",
-          disable_web_page_preview: false
+          disable_web_page_preview: true // <--- Отключаем огромные картинки со ссылок
         })
       });
-      return new Response("⚠️ Фото не ушло, отправлен только текст", { status: 200 });
+      return new Response("⚠️ Картинка от нейросети не загрузилась, отправлен текст с ошибкой (если она есть)", { status: 200 });
     }
 
     return new Response("🤖 Отправлено без багов!", { status: 200 });
