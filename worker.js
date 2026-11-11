@@ -15,22 +15,29 @@ async function handleNewsGeneration(env) {
     let newsLink = null;
 
     try {
+      console.log("Ищем новости в Hacker News...");
       const topStoriesRes = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json");
       const storyIds = await topStoriesRes.json();
-      const recentIds = storyIds.slice(0, 20);
+      
+      // УВЕЛИЧИЛИ ДО 50, чтобы найти те, которые точно не отправляли
+      const recentIds = storyIds.slice(0, 50);
+      console.log(`Получено ID новостей: ${recentIds.length}. Начинаем проверку...`);
 
       for (const id of recentIds) {
         const key = `sent:hn_${id}`;
         const alreadySent = await env.NEWS_KV.get(key);
 
         if (!alreadySent) {
+          console.log(`Нашли новую новость с ID: ${id}`);
           const itemRes = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
           const item = await itemRes.json();
 
+          // Проверка, что новость не удалена и у неё есть заголовок
           if (item && item.title) {
             currentTopic = item.title;
             newsLink = item.url || `https://news.ycombinator.com/item?id=${id}`;
             await env.NEWS_KV.put(key, "1");
+            console.log(`Выбрана тема: ${currentTopic}`);
             break; 
           }
         }
@@ -40,6 +47,7 @@ async function handleNewsGeneration(env) {
     }
 
     if (!currentTopic) {
+      console.log("Все новости из списка уже были опубликованы.");
       return new Response("📭 Нет новых тем для публикации.", { status: 200 });
     }
 
@@ -65,7 +73,7 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    // ОБНОВЛЕНО: Используем модель gemini-3.8-flash
+    console.log("Отправляем запрос в Gemini...");
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${env.GEMINI_API_KEY}`;
     
     const geminiResponse = await fetch(geminiUrl, {
@@ -91,11 +99,13 @@ async function handleNewsGeneration(env) {
     
     let rapText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    // Если Gemini вернул ошибку, показываем её читаемым текстом (без сырых HTML-тегов)
     if (!rapText || rapText.length < 10) {
+      console.error("ОШИБКА GEMINI:", JSON.stringify(geminiData));
       const errorDetails = JSON.stringify(geminiData).substring(0, 300); 
       const safeError = errorDetails.replace(/</g, '&lt;').replace(/>/g, '&gt;');
       rapText = `🚨 ОШИБКА API!\nВот что ответил Google:\n${safeError}`;
+    } else {
+      console.log("Рэп успешно сгенерирован!");
     }
 
     // === БЛОК 4: Формируем пост ===
@@ -109,6 +119,7 @@ async function handleNewsGeneration(env) {
     const finalPost = `🎧 <b>Инфоповод:</b> ${safeTitle}\n🔗 <a href="${newsLink}">Источник</a>\n\n${safeRap}`;
 
     // === БЛОК 5: Отправка в Telegram ===
+    console.log("Отправляем в Telegram...");
     const tgUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
     const tgResponse = await fetch(tgUrl, {
       method: "POST",
@@ -125,7 +136,6 @@ async function handleNewsGeneration(env) {
       const errText = await tgResponse.text();
       console.error("Ошибка sendPhoto:", errText);
       
-      // Если картинка не загрузилась, отправляем просто текст (без превью)
       const tgTextUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
       await fetch(tgTextUrl, {
         method: "POST",
