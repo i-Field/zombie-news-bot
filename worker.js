@@ -43,11 +43,11 @@ async function handleNewsGeneration(env) {
       return new Response("📭 Нет новых тем для публикации.", { status: 200 });
     }
 
-    // === БЛОК 2: Бесконечные картинки (больше никаких повторов) ===
-    // Используем LoremFlickr, который генерирует уникальную картинку по тегам
-    // Добавляем Math.random(), чтобы Cloudflare не кэшировал картинку
-    const randomSeed = Math.floor(Math.random() * 10000);
-    const randomImage = `https://loremflickr.com/800/600/cyberpunk,robot,neon/all?lock=${randomSeed}`;
+    // === БЛОК 2: Бесконечные картинки от Pollinations.ai ===
+    const randomSeed = Math.floor(Math.random() * 100000);
+    // Генерируем картинку по промпту: киберпанк, зомби, неон
+    const promptForImage = "cyberpunk,zombie,neon,glitch,robot,dj";
+    const randomImage = `https://image.pollinations.ai/prompt/${promptForImage}?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
     // === БЛОК 3: Промпт для Gemini с рандомизацией стиля ===
     // Добавляем случайный стиль, чтобы Gemini не повторялся
