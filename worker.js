@@ -8,6 +8,7 @@ export default {
   }
 };
 
+// Функция отправки логов прямо в Telegram
 async function sendDebug(env, text) {
   try {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -25,7 +26,7 @@ async function handleNewsGeneration(env) {
     // === БЛОК 1: Hacker News ===
     let currentTopic = null;
     let newsLink = null;
-    let newsKey = null; // Запоминаем ключ новости, чтобы сохранить его в конце
+    let newsKey = null;
 
     try {
       const topStoriesRes = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json");
@@ -43,7 +44,7 @@ async function handleNewsGeneration(env) {
           if (item && item.title) {
             currentTopic = item.title;
             newsLink = item.url || `https://news.ycombinator.com/item?id=${id}`;
-            newsKey = key; // Сохраняем ключ в переменную, но НЕ пишем в базу
+            newsKey = key;
             await sendDebug(env, `Найдена тема: "${currentTopic}"`);
             break; 
           }
@@ -58,11 +59,11 @@ async function handleNewsGeneration(env) {
       return new Response("📭 Нет новых тем.", { status: 200 });
     }
 
-    // === БЛОК 2: Картинка ===
+    // === БЛОК 2: Картинка (упрощенный запрос для стабильности) ===
     const randomSeed = Math.floor(Math.random() * 100000);
-    const randomImage = `https://image.pollinations.ai/prompt/cyberpunk,zombie,neon,robot?width=800&height=600&nologo=true&seed=${randomSeed}`;
+    const randomImage = `https://image.pollinations.ai/prompt/cyberpunk,neon,robot,dark?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
-    // === БЛОК 3: Gemini с автоповтором ===
+    // === БЛОК 3: Gemini (Обновленная модель 3.5-flash) ===
     if (!env.GEMINI_API_KEY) {
       await sendDebug(env, "КРИТИЧЕСКАЯ ОШИБКА: Переменная GEMINI_API_KEY пуста!");
       return new Response("Нет ключа", { status: 500 });
@@ -74,18 +75,19 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent`;
+    // Актуальная модель с высокой стабильностью
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent`;
     
     let rapText = null;
     let lastError = "Неизвестная ошибка";
-    const MAX_RETRIES = 3;
+    const MAX_RETRIES = 2; // Уменьшили количество попыток для скорости
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         await sendDebug(env, `Стучусь в Gemini (попытка ${attempt} из ${MAX_RETRIES})...`);
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); 
+        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 секунд достаточно
 
         const response = await fetch(geminiUrl, {
           method: "POST",
@@ -122,7 +124,7 @@ async function handleNewsGeneration(env) {
           break; 
         }
       } catch (error) {
-        lastError = error.name === 'AbortError' ? "Таймаут (30 сек)." : error.message;
+        lastError = error.name === 'AbortError' ? "Таймаут (20 сек)." : error.message;
         if (attempt < MAX_RETRIES) {
           await sendDebug(env, `Сбой: ${lastError}. Пробуем снова...`);
           await new Promise(r => setTimeout(r, 2000));
@@ -155,11 +157,9 @@ async function handleNewsGeneration(env) {
       })
     });
 
-    // === БЛОК 6: СОХРАНЯЕМ В БАЗУ ТОЛЬКО ЕСЛИ ВСЁ УСПЕШНО ===
+    // === БЛОК 6: Сохраняем в KV только при успехе ===
     if (tgResponse.ok) {
-      if (newsKey) {
-        await env.NEWS_KV.put(newsKey, "1"); // Вот теперь новость официально считается отправленной
-      }
+      if (newsKey) await env.NEWS_KV.put(newsKey, "1");
       return new Response("🤖 Отправлено без багов!", { status: 200 });
     } else {
       await sendDebug(env, "Фото не ушло, шлю только текст.");
@@ -175,10 +175,7 @@ async function handleNewsGeneration(env) {
         })
       });
 
-      // Если даже текст ушел, сохраняем в базу
-      if (textResponse.ok && newsKey) {
-         await env.NEWS_KV.put(newsKey, "1");
-      }
+      if (textResponse.ok && newsKey) await env.NEWS_KV.put(newsKey, "1");
       return new Response("⚠️ Отправлен текст", { status: 200 });
     }
 
