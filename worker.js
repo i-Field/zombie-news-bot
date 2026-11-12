@@ -59,11 +59,11 @@ async function handleNewsGeneration(env) {
       return new Response("📭 Нет новых тем.", { status: 200 });
     }
 
-    // === БЛОК 2: Картинка (упрощенный запрос для стабильности) ===
+    // === БЛОК 2: Генерация картинки ===
     const randomSeed = Math.floor(Math.random() * 100000);
     const randomImage = `https://image.pollinations.ai/prompt/cyberpunk,neon,robot,dark?width=800&height=600&nologo=true&seed=${randomSeed}`;
 
-    // === БЛОК 3: Gemini (Обновленная модель 3.5-flash) ===
+    // === БЛОК 3: Gemini (Модель flash-latest + Таймаут 30 сек) ===
     if (!env.GEMINI_API_KEY) {
       await sendDebug(env, "КРИТИЧЕСКАЯ ОШИБКА: Переменная GEMINI_API_KEY пуста!");
       return new Response("Нет ключа", { status: 500 });
@@ -75,19 +75,20 @@ async function handleNewsGeneration(env) {
 🧟‍♂️ Zombie-DJ: [текст куплета в 2 строки с рифмой]
 🤖 Cyber-MC: [текст ответа в 2 строки с рифмой]`;
 
-    // Актуальная модель с высокой стабильностью
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent`;
+    // Используем актуальный псевдоним, который Google всегда поддерживает
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent`;
     
     let rapText = null;
     let lastError = "Неизвестная ошибка";
-    const MAX_RETRIES = 2; // Уменьшили количество попыток для скорости
+    const MAX_RETRIES = 2;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         await sendDebug(env, `Стучусь в Gemini (попытка ${attempt} из ${MAX_RETRIES})...`);
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 секунд достаточно
+        // Увеличили таймаут до 30 секунд для надежности
+        const timeoutId = setTimeout(() => controller.abort(), 30000); 
 
         const response = await fetch(geminiUrl, {
           method: "POST",
@@ -124,7 +125,7 @@ async function handleNewsGeneration(env) {
           break; 
         }
       } catch (error) {
-        lastError = error.name === 'AbortError' ? "Таймаут (20 сек)." : error.message;
+        lastError = error.name === 'AbortError' ? "Таймаут (30 сек)." : error.message;
         if (attempt < MAX_RETRIES) {
           await sendDebug(env, `Сбой: ${lastError}. Пробуем снова...`);
           await new Promise(r => setTimeout(r, 2000));
@@ -157,7 +158,7 @@ async function handleNewsGeneration(env) {
       })
     });
 
-    // === БЛОК 6: Сохраняем в KV только при успехе ===
+    // === БЛОК 6: Сохраняем в KV только при успешной отправке ===
     if (tgResponse.ok) {
       if (newsKey) await env.NEWS_KV.put(newsKey, "1");
       return new Response("🤖 Отправлено без багов!", { status: 200 });
