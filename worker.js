@@ -353,28 +353,70 @@ async function generatePostWithGemini(env, news, style) {
   throw new Error(lastError);
 }
 
-async function downloadCoverImage(prompt) {
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function generateCoverImage(env, prompt) {
   const cleanPrompt = String(prompt || 'undead cyberpunk zombie rapper in dark neon city, digital art')
     .replace(/[^\w\s,.-]/g, ' ')
-    .slice(0, 260)
+    .slice(0, 320)
     .trim();
-  const seed = Math.floor(Math.random() * 1000000);
-  const urls = [
-    `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?width=800&height=600&nologo=true&model=flux&seed=${seed}`,
-    `https://image.pollinations.ai/prompt/${encodeURIComponent('dark neon cyberpunk zombie DJ in underground bar, cinematic art')}?width=800&height=600&nologo=true&seed=${seed}`
-  ];
 
-  for (const imgUrl of urls) {
+  if (env.AI && typeof env.AI.run === 'function') {
     try {
-      const res = await fetchWithTimeout(imgUrl, { headers: { Accept: 'image/*' } }, 18000);
-      const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (!res.ok || !ct.startsWith('image/')) continue;
-      const buf = await res.arrayBuffer();
-      if (buf.byteLength > 4096) {
-        return { buffer: buf, mime: ct.split(';')[0] };
+      const fluxRes = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+        prompt: cleanPrompt,
+        steps: 6
+      });
+      if (fluxRes && typeof fluxRes.image === 'string') {
+        const buffer = base64ToArrayBuffer(fluxRes.image);
+        if (buffer.byteLength > 4096) return { buffer, mime: 'image/jpeg' };
+      }
+    } catch {}
+
+    try {
+      const sdRes = await env.AI.run('@cf/bytedance/stable-diffusion-xl-lightning', {
+        prompt: cleanPrompt
+      });
+      const buffer = sdRes instanceof ArrayBuffer
+        ? sdRes
+        : (sdRes instanceof Uint8Array ? sdRes.buffer : await new Response(sdRes).arrayBuffer());
+      if (buffer && buffer.byteLength > 4096) return { buffer, mime: 'image/png' };
+    } catch {}
+  }
+
+  if (env.GEMINI_API_KEY) {
+    try {
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent';
+      const res = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': env.GEMINI_API_KEY
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: cleanPrompt }] }],
+          generationConfig: { responseModalities: ['IMAGE'] }
+        })
+      }, 20000);
+      if (res.ok) {
+        const data = await res.json();
+        const parts = data.candidates?.[0]?.content?.parts || [];
+        const imgPart = parts.find((p) => p.inlineData && p.inlineData.data);
+        if (imgPart) {
+          const buffer = base64ToArrayBuffer(imgPart.inlineData.data);
+          if (buffer.byteLength > 4096) {
+            return { buffer, mime: imgPart.inlineData.mimeType || 'image/png' };
+          }
+        }
       }
     } catch {}
   }
+
   return null;
 }
 
@@ -475,7 +517,7 @@ async function runPipeline(env, opts = {}) {
     return { ok: false, error: err.message };
   }
 
-  const imageObj = await downloadCoverImage(gen.image_prompt);
+  const imageObj = await generateCoverImage(env, gen.image_prompt);
   const caption = formatCaption(news, gen, style);
 
   if (toAdminDraft && env.ADMIN_CHAT_ID) {
@@ -506,7 +548,7 @@ async function runPipeline(env, opts = {}) {
         style
       }), { expirationTtl: 86400 });
     }
-    return { ok: Boolean(res.ok), mode: 'draft', style, category: news.category };
+    return { ok: Boolean(res.ok), mode: 'draft', style, category: news.category, hasImage: Boolean(imageObj) };
   }
 
   const sendRes = await sendPostToChat(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, caption, imageObj);
@@ -515,7 +557,7 @@ async function runPipeline(env, opts = {}) {
     state.lastCategory = news.category;
     state.lastStyle = style;
     await saveState(env.NEWS_KV, state);
-    return { ok: true, mode: 'channel', style, category: news.category };
+    return { ok: true, mode: 'channel', style, category: news.category, hasImage: Boolean(imageObj) };
   }
 
   await notifyAdmin(env, `❌ Ошибка отправки в канал: ${sendRes.description || 'Unknown'}`);
@@ -565,6 +607,7 @@ async function handleSetup(request, env) {
 
   return jsonResp({
     ok: Boolean(wh.ok && cmds.ok),
+    hasWorkersAI: Boolean(env.AI),
     runUrl: `${origin}/run?key=${runSecret}`,
     draftUrl: `${origin}/run?key=${runSecret}&preview=1`,
     wh,
@@ -624,19 +667,19 @@ async function processAdminCommand(env, chatId, text) {
   if (/^\/(start|menu)/i.test(text)) {
     await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
       chat_id: chatId,
-      text: `🧟‍♂️ <b>Zombie News Flava — Пульт</b>\nКанал: ${escHtml(env.TELEGRAM_CHAT_ID)}\nРежим крона: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
+      text: `🧟‍♂️ <b>Zombie News Flava — Пульт</b>\nКанал: ${escHtml(env.TELEGRAM_CHAT_ID)}\nОбложки AI: <b>${env.AI ? '⚡ Подключён' : '⚠️ Нет привязки [ai]'}</b>\nРежим крона: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
       parse_mode: 'HTML',
       reply_markup: adminKeyboard(state.cronMode)
     });
   } else if (/^\/status/i.test(text)) {
     await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
       chat_id: chatId,
-      text: `📊 <b>Статус</b>\nВ истории новостей: <b>${state.sent.length}</b>\nПоследняя рубрика: <b>${CATEGORY_LABELS[state.lastCategory] || '—'}</b>\nПоследний стиль: <b>${STYLE_LABELS[state.lastStyle] || '—'}</b>\nКрон: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
+      text: `📊 <b>Статус</b>\nВ истории новостей: <b>${state.sent.length}</b>\nПоследняя рубрика: <b>${CATEGORY_LABELS[state.lastCategory] || '—'}</b>\nПоследний стиль: <b>${STYLE_LABELS[state.lastStyle] || '—'}</b>\nОбложки (Workers AI): <b>${env.AI ? '⚡ Активно' : '❌ Не привязан'}</b>\nКрон: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
       parse_mode: 'HTML',
       reply_markup: adminKeyboard(state.cronMode)
     });
   } else if (/^\/draft/i.test(text)) {
-    await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: '⏳ Ищу свежий треш и пишу трек...' });
+    await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: '⏳ Ищу свежий треш, пишу трек и рисую обложку...' });
     await runPipeline(env, { toAdminDraft: true });
   } else if (/^\/(rap|chanson|battle)/i.test(text)) {
     const forcedStyle = text.slice(1).split(/\s+/)[0].toLowerCase();
@@ -712,7 +755,7 @@ async function processCallback(env, cq) {
     const nextStyle = STYLES[(STYLES.indexOf(draft.style) + 1) % STYLES.length];
     try {
       const gen = await generatePostWithGemini(env, draft.news, nextStyle);
-      const imageObj = await downloadCoverImage(gen.image_prompt);
+      const imageObj = await generateCoverImage(env, gen.image_prompt);
       const caption = formatCaption(draft.news, gen, nextStyle);
       const newId = crypto.randomUUID().slice(0, 8);
       const kb = {
