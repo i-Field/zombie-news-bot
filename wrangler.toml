@@ -15,3 +15,5 @@ enabled = true
 # Это примерно 11:00 и 23:00 по Киеву/Москве
 [triggers]
 crons = ["0 9,21 * * *"]
+[ai]
+binding = "AI"
