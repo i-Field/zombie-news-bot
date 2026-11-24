@@ -64,9 +64,16 @@ const COOKIE_PACKS = {
 const RAM_CHATS = new Map();
 const RAM_STATS = { data: null, ts: 0 };
 const RAM_RATE = new Map();
+const RAM_BOT = { username: '' };
+const RAM_TRACE = [];
 
 const MAX_RAM_CHATS = 120;
 const KV_FLUSH_INTERVAL_MS = 180000; // max 1 KV write per 3 min per active chat
+
+function addTrace(entry) {
+  RAM_TRACE.unshift({ ts: new Date().toISOString(), ...entry });
+  if (RAM_TRACE.length > 10) RAM_TRACE.length = 10;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -86,6 +93,10 @@ export default {
 
       if (request.method === 'GET' && path === '/setup') {
         return handleSetup(request, env);
+      }
+
+      if (request.method === 'GET' && path === '/debug') {
+        return handleDebug(request, env);
       }
 
       if (request.method === 'GET' && path === '/run') {
@@ -216,6 +227,7 @@ export default {
         const expectedSecret = await getWebhookSecret(env);
         const gotSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
         if (expectedSecret && gotSecret && gotSecret !== expectedSecret) {
+          addTrace({ stage: 'webhook_401', info: 'Secret mismatch — run /setup' });
           return new Response('Unauthorized', { status: 401 });
         }
         const update = await safeJson(request);
@@ -237,7 +249,7 @@ export default {
   },
 };
 
-// ---------------- SETUP & SECRETS ----------------
+// ---------------- SETUP & DEBUG ----------------
 
 async function getWebhookSecret(env) {
   if (env.TELEGRAM_WEBHOOK_SECRET) return env.TELEGRAM_WEBHOOK_SECRET;
@@ -263,10 +275,13 @@ async function handleSetup(request, env) {
   });
 
   const me = await tgCall(env, 'getMe', {});
+  if (me && me.result && me.result.username) {
+    RAM_BOT.username = me.result.username.toLowerCase();
+  }
 
   const privateCommands = [
     { command: 'start', description: 'Открыть студию и игры' },
-    { command: 'games', description: 'Игры и проекты i-Field' },
+    { command: 'games', description: 'Все боты и игры i-Field' },
     { command: 'roast', description: 'Прожарка от Zombie-DJ' },
     { command: 'cookie', description: 'Угостить диджеев печеньем' },
     { command: 'ping', description: 'Проверка связи и AI' },
@@ -299,6 +314,7 @@ async function handleSetup(request, env) {
   return jsonResp({
     ok: wh.ok,
     bot: me.result ? '@' + me.result.username : null,
+    canReadAllGroupMessages: me.result ? Boolean(me.result.can_read_all_group_messages) : null,
     webhookUrl,
     hasKV: Boolean(env.NEWS_KV),
     hasAI: Boolean(env.AI),
@@ -309,18 +325,64 @@ async function handleSetup(request, env) {
   });
 }
 
-// ---------------- ECOSYSTEM ----------------
+async function handleDebug(request, env) {
+  const me = await tgCall(env, 'getMe', {});
+  const whInfo = await tgCall(env, 'getWebhookInfo', {});
+
+  let geminiTest = 'no key';
+  let availableModels = [];
+  if (env.GEMINI_API_KEY) {
+    try {
+      const mRes = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+        headers: { 'x-goog-api-key': env.GEMINI_API_KEY },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (mRes.ok) {
+        const mj = await mRes.json();
+        availableModels = (mj.models || [])
+          .map((m) => String(m.name || '').replace(/^models\//, ''))
+          .filter((n) => n.includes('gemini'))
+          .slice(0, 12);
+      }
+    } catch (_) {}
+
+    try {
+      const t0 = Date.now();
+      const g = await callGeminiText(env, {
+        systemInstruction: 'Ответь одним словом: Работает.',
+        prompt: 'Тест.',
+        json: false,
+      });
+      geminiTest = 'OK (' + g.model + ', ' + (Date.now() - t0) + 'ms)';
+    } catch (e) {
+      geminiTest = 'ERROR: ' + String(e.message || e);
+    }
+  }
+
+  return jsonResp({
+    ok: true,
+    bot: me.result || me,
+    webhookInfo: whInfo.result || whInfo,
+    geminiTest,
+    availableModels,
+    ramChatsCount: RAM_CHATS.size,
+    recentTrace: RAM_TRACE,
+  });
+}
+
+// ---------------- ECOSYSTEM (ALL TELEGRAM BOTS) ----------------
 
 function resolveLink(val, fallback) {
   const v = String(val || '').trim();
   if (!v) return fallback;
   if (v.startsWith('@')) return 'https://t.me/' + v.slice(1);
+  if (v.startsWith('t.me/')) return 'https://' + v;
   if (v.startsWith('http://') || v.startsWith('https://')) return v;
   return fallback;
 }
 
 function getEcosystem(env) {
-  const botUser = String(env.BOT_USERNAME || 'zombie_rap_news_bot').replace(/^@/, '');
+  const botUser = String(env.BOT_USERNAME || RAM_BOT.username || 'zombie_rap_news_bot').replace(/^@/, '');
   const channelUser = String(env.CHANNEL_USERNAME || 'zombie_news_flava').replace(/^@/, '');
   return {
     botUser,
@@ -329,32 +391,53 @@ function getEcosystem(env) {
     botUrl: 'https://t.me/' + botUser,
     projects: [
       {
-        id: 'forest',
+        id: 'forest5x5',
         name: 'Forest Fortune 5x5',
-        desc: 'Сказочный слот-лес с каскадами, бонусами и духами природы.',
+        desc: 'Сказочный каскадный слот-лес 5x5 с духами, комбо и бонус-раундами.',
         url: resolveLink(env.SLOTS_BOT || env.SLOTS_URL, 'https://t.me/ForestFortuneVegasBot'),
-        cta: 'Крутить лес',
+        cta: 'Крутить 5x5',
       },
       {
         id: 'durak',
-        name: 'Подкидной Дурак',
-        desc: 'Карточные баталии: проверка блефа и удачи за одним столом.',
-        url: resolveLink(env.DURAK_BOT || env.DURAK_URL, 'https://i-field.github.io/durak-mini-app/'),
+        name: 'Дурак Империя',
+        desc: 'Подкидной Дурак: проверка блефа, козырей и удачи за столом.',
+        url: resolveLink(env.DURAK_BOT || env.DURAK_URL, 'https://t.me/durak_empire_bot'),
         cta: 'Срубить в Дурака',
       },
       {
         id: 'roger',
-        name: 'Lucky Roger Slot',
-        desc: 'Пиратский азарт, сундуки удачи и быстрые спины.',
-        url: resolveLink(env.ROGER_BOT || env.ROGER_URL, 'https://i-field.github.io/lucky-roger-slot/'),
+        name: 'Lucky Rodger Slot',
+        desc: 'Пиратский азарт, сундуки с золотом и быстрые спины.',
+        url: resolveLink(env.ROGER_BOT || env.ROGER_URL, 'https://t.me/LUCKY_RODGER_BOT'),
         cta: 'К Роджеру',
       },
       {
-        id: 'music',
-        name: 'iField Music Lab',
-        desc: 'Лаборатория битов, саунда и музыкальных экспериментов.',
-        url: resolveLink(env.MUSIC_BOT || env.MUSIC_URL, 'https://i-field.github.io/ifield-music-lab/'),
-        cta: 'Открыть Lab',
+        id: 'empire',
+        name: 'Khutor Empire',
+        desc: 'Развивай свой хутор, строй империю и собирай ресурсы.',
+        url: resolveLink(env.EMPIRE_BOT || env.EMPIRE_URL, 'https://t.me/KhutorEmpireBot'),
+        cta: 'В Империю',
+      },
+      {
+        id: 'forest',
+        name: 'Forest Fortune Classic',
+        desc: 'Классическая версия волшебного лесного слота.',
+        url: resolveLink(env.FOREST_CLASSIC_BOT, 'https://t.me/Forest_Fortune_Bot'),
+        cta: 'Открыть слот',
+      },
+      {
+        id: 'studio',
+        name: 'iField Studio',
+        desc: 'Креативная мастерская, музыка и визуальные проекты i-Field.',
+        url: resolveLink(env.STUDIO_BOT, 'https://t.me/ifield_studio_bot'),
+        cta: 'В Студию',
+      },
+      {
+        id: 'chat',
+        name: 'iField Chat',
+        desc: 'Умный AI-собеседник и цифровой помощник экосистемы.',
+        url: resolveLink(env.CHAT_BOT, 'https://t.me/chat_ifield_bot'),
+        cta: 'Открыть чат',
       },
     ],
   };
@@ -376,7 +459,7 @@ async function handleTelegramUpdate(env, update, origin) {
     return;
   }
 
-  const msg = update.message;
+  const msg = update.message || update.edited_message;
   if (!msg) return;
 
   if (msg.successful_payment) {
@@ -386,6 +469,14 @@ async function handleTelegramUpdate(env, update, origin) {
 
   const chat = msg.chat || {};
   const chatType = chat.type || 'private';
+  addTrace({
+    stage: 'incoming',
+    chatType,
+    chatId: chat.id,
+    fromId: msg.from && msg.from.id,
+    isBot: Boolean(msg.from && msg.from.is_bot),
+    text: String(msg.text || msg.caption || (msg.new_chat_members ? '[new_members]' : '[non-text]')).slice(0, 60),
+  });
 
   if (chatType === 'group' || chatType === 'supergroup') {
     await handleGroupMessage(env, msg, origin);
@@ -502,7 +593,7 @@ async function handlePrivateMessage(env, msg, origin) {
       text:
         '🧟‍♂️ <b>Салют, ' + name + '! На связи Zombie-DJ и Дядя Коля Мертвец.</b>\n\n' +
         'Можешь просто писать мне сюда любым текстом — поболтаем, разберём новости, сделаю прожарку или подкину игру.\n\n' +
-        '• <b>/games</b> — все твои игры и проекты\n' +
+        '• <b>/games</b> — все твои боты и игры i-Field\n' +
         '• <b>/roast</b> — зачитать прожарку\n' +
         '• <b>/cookie</b> — угостить студию печеньем\n' +
         '• <b>/ping</b> — проверить связь и AI',
@@ -511,7 +602,7 @@ async function handlePrivateMessage(env, msg, origin) {
         inline_keyboard: [
           [{ text: '🎛 Открыть Студию и Игры', web_app: { url: origin + '/' } }],
           [
-            { text: '🎮 Проекты i-Field', callback_data: 'show_games' },
+            { text: '🎮 Боты i-Field (7)', callback_data: 'show_games' },
             { text: '🍪 Угостить диджеев', callback_data: 'show_cookies' },
           ],
           [{ text: '📢 Канал @' + eco.channelUser, url: eco.channelUrl }],
@@ -554,8 +645,7 @@ async function handlePrivateMessage(env, msg, origin) {
     return;
   }
 
-  // Plain conversational message in private DM!
-  if (!allowRate('dm:' + chatId, 2000)) return;
+  if (!allowRate('dm:' + chatId, 1800)) return;
   await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
 
   const memKey = 'dm:' + chatId;
@@ -569,17 +659,18 @@ async function handlePrivateMessage(env, msg, origin) {
     await flushChatMem(env, memKey, state, false);
 
     const prefix = aiOut.persona === 'kolya' ? '🎸 <b>Дядя Коля:</b> ' : '🎤 <b>Zombie-DJ:</b> ';
-    await tgCall(env, 'sendMessage', {
+    const sent = await tgCall(env, 'sendMessage', {
       chat_id: chatId,
       text: prefix + escapeHtml(aiOut.reply),
       parse_mode: 'HTML',
       reply_markup: buildCtaMarkup(env, origin, aiOut.cta, true),
     });
+    addTrace({ stage: 'dm_reply', ok: sent.ok, err: sent.description || null });
   } catch (err) {
-    console.error('Private AI error:', err);
+    addTrace({ stage: 'dm_err', err: String(err.message || err) });
     await tgCall(env, 'sendMessage', {
       chat_id: chatId,
-      text: '⚠️ Студийный AI временно не ответил: ' + String(err.message || err).slice(0, 140),
+      text: '⚠️ Студийный AI не ответил: ' + String(err.message || err).slice(0, 160),
     });
   }
 }
@@ -601,17 +692,17 @@ async function handleGroupMessage(env, msg, origin) {
         text:
           '🧟‍♂️ О, свежая кровь в эфире — салют, <b>' + names + '</b>!\n' +
           'Мы тут с Дядей Колей крутим новости, делаем прожарки и рубимся в игры.\n\n' +
-          'Можете звать меня по имени («Зомби», «Дядя Коля», @' + eco.botUser + ') или сразу жмите кнопку:',
+          'Можете звать меня по имени («Зомби», «Дядя Коля», @' + eco.botUser + ') или сразу залетать:',
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '🃏 Срубить в Дурака', url: eco.projects[1].url },
-              { text: '🌲 Forest Fortune', url: eco.projects[0].url },
+              { text: '🃏 Дурак Империя', url: eco.projects[1].url },
+              { text: '🌲 Forest 5x5', url: eco.projects[0].url },
             ],
             [
               { text: '🔥 Прожарить чат', callback_data: 'group_roast' },
-              { text: '📰 Кинуть новость', callback_data: 'group_news' },
+              { text: '🎮 Все боты', callback_data: 'show_games' },
             ],
           ],
         },
@@ -620,12 +711,20 @@ async function handleGroupMessage(env, msg, origin) {
     return;
   }
 
-  if (msg.from && msg.from.is_bot) return;
+  // Allow anonymous admins (GroupAnonymousBot id 1087968824), ignore other bots
+  if (msg.from && msg.from.is_bot && Number(msg.from.id) !== 1087968824) return;
 
   const text = String(msg.text || msg.caption || '').trim();
   if (!text) return;
 
-  const botUsername = String(env.BOT_USERNAME || 'zombie_rap_news_bot').replace(/^@/, '').toLowerCase();
+  if (!RAM_BOT.username && !env.BOT_USERNAME && env.TELEGRAM_BOT_TOKEN) {
+    const me = await tgCall(env, 'getMe', {});
+    if (me && me.result && me.result.username) RAM_BOT.username = me.result.username.toLowerCase();
+  }
+  const botUsername = String(env.BOT_USERNAME || RAM_BOT.username || 'zombie_rap_news_bot')
+    .replace(/^@/, '')
+    .toLowerCase();
+
   const rawCmd = text.split(/\s+/)[0].toLowerCase();
   const cmdParts = rawCmd.split('@');
   const cmd = cmdParts[0];
@@ -657,16 +756,24 @@ async function handleGroupMessage(env, msg, origin) {
 
   // Record incoming human message in RAM first (0 KV writes!)
   const state = await getChatMem(env, memKey);
-  const authorName = (msg.from && (msg.from.first_name || msg.from.username)) || 'Участник';
+  const authorName =
+    (msg.sender_chat && msg.sender_chat.title) ||
+    (msg.from && Number(msg.from.id) !== 1087968824 && (msg.from.first_name || msg.from.username)) ||
+    'Участник';
   pushChatLine(state, authorName, text);
   state.msgSinceBot = (state.msgSinceBot || 0) + 1;
 
   const decision = shouldReplyInGroup(msg, text, state, botUsername);
+  addTrace({
+    stage: 'group_eval',
+    reply: decision.reply,
+    direct: decision.direct,
+    msgSinceBot: state.msgSinceBot,
+  });
   if (!decision.reply) return;
 
-  // Anti-spam cooldown on non-direct triggers
   const now = Date.now();
-  if (!decision.direct && now - (state.lastBotAt || 0) < 12000) return;
+  if (!decision.direct && now - (state.lastBotAt || 0) < 8000) return;
 
   try {
     await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
@@ -676,24 +783,25 @@ async function handleGroupMessage(env, msg, origin) {
     state.msgSinceBot = 0;
     pushChatLine(state, aiOut.persona === 'kolya' ? 'Дядя Коля' : 'Zombie-DJ', aiOut.reply);
 
-    // Flush to KV only at most once every 3 minutes!
+    // Flush to KV at most once every 3 minutes
     await flushChatMem(env, memKey, state, false);
 
     const prefix = aiOut.persona === 'kolya' ? '🎸 <b>Дядя Коля:</b> ' : '🎤 <b>Zombie-DJ:</b> ';
-    await tgCall(env, 'sendMessage', {
+    const sent = await tgCall(env, 'sendMessage', {
       chat_id: chatId,
       text: prefix + escapeHtml(aiOut.reply),
       parse_mode: 'HTML',
       reply_to_message_id: decision.direct ? msg.message_id : undefined,
       reply_markup: buildCtaMarkup(env, origin, aiOut.cta, false),
     });
+    addTrace({ stage: 'group_sent', ok: sent.ok, err: sent.description || null });
   } catch (err) {
-    console.error('Group AI error:', err);
+    addTrace({ stage: 'group_err', err: String(err.message || err) });
     if (decision.direct) {
       await tgCall(env, 'sendMessage', {
         chat_id: chatId,
         reply_to_message_id: msg.message_id,
-        text: '⚠️ Микрофон сбоит (' + String(err.message || err).slice(0, 120) + ')',
+        text: '⚠️ Микрофон сбоит: ' + String(err.message || err).slice(0, 150),
       });
     }
   }
@@ -705,25 +813,26 @@ function shouldReplyInGroup(msg, text, state, botUsername) {
   const isReplyToBot = Boolean(replyUser && replyUser.toLowerCase() === botUsername);
   const isMention = lower.includes('@' + botUsername);
 
-  const hasTriggerWord = /(^|[^а-яёa-z0-9])(зомби|коля|колян|мертвец|диджей|dj|бот|нейросет|дурак|картишк|слот|роджер|фортун|игр|музык|рэп|шансон|трек|новост|скучно|прожар|печень|банкет|привет всем|кто тут|че по новостям|что нового|погнали|сыграем)([^а-яёa-z0-9]|$)/i.test(
+  const hasTriggerWord = /(^|[^а-яёa-z0-9])(зомби|коля|колян|мертвец|диджей|dj|бот|нейросет|дурак|картишк|слот|роджер|фортун|хутор|импери|игр|музык|рэп|шансон|трек|новост|скучно|прожар|печень|банкет|привет|салют|здаров|здорово|кто тут|че как|что нового|как дела|погнали|сыграем|поболтаем)([^а-яёa-z0-9]|$)/i.test(
     lower
   );
 
   if (isReplyToBot || isMention) {
     return { reply: true, direct: true };
   }
-  if (hasTriggerWord) {
-    return { reply: true, direct: true };
-  }
 
   const now = Date.now();
   const elapsed = now - (state.lastBotAt || 0);
 
-  if (text.includes('?') && text.length >= 8 && (state.msgSinceBot || 0) >= 2 && elapsed >= 45000) {
+  if (hasTriggerWord && elapsed >= 15000) {
+    return { reply: true, direct: true };
+  }
+
+  if (text.includes('?') && text.length >= 6 && (state.msgSinceBot || 0) >= 2 && elapsed >= 25000) {
     return { reply: true, direct: false };
   }
 
-  if (text.length >= 5 && (state.msgSinceBot || 0) >= 4 && elapsed >= 60000) {
+  if (text.length >= 4 && (state.msgSinceBot || 0) >= 3 && elapsed >= 30000) {
     return { reply: true, direct: false };
   }
 
@@ -747,7 +856,7 @@ async function handlePingCommand(env, msg, text) {
       });
       aiDiag = 'OK (' + r.model + ', ' + (Date.now() - t0) + 'ms)';
     } catch (e) {
-      aiDiag = 'ОШИБКА: ' + String(e.message || e).slice(0, 120);
+      aiDiag = 'ОШИБКА: ' + String(e.message || e).slice(0, 140);
     }
   }
 
@@ -836,16 +945,19 @@ async function generateChatReply(env, mode, state, currentText, authorName) {
     '1. Выбери, кто сейчас отвечает: "zombie" или "kolya".\n' +
     '2. Отвечай живо, коротко (2–4 предложения), по-русски, с юмором и учётом имён и контекста переписки.\n' +
     '3. Никогда не звучи как скучный справочный ассистент. Не повторяй чужие слова дословно.\n' +
-    '4. Иногда, когда это органично по разговору (скука, азарт, отдых, музыка, новости), можешь предложить:\n' +
-    '   - "durak": срубить в Подкидного Дурака\n' +
-    '   - "slots": крутануть Forest Fortune 5x5\n' +
-    '   - "roger": заглянуть в пиратский слот Lucky Roger\n' +
-    '   - "music": послушать биты в iField Music Lab\n' +
-    '   - "news": обсудить свежую новость дня\n' +
-    '   - "studio": открыть студию\n' +
+    '4. Иногда, когда это органично по разговору (скука, азарт, карты, стратегия, общение, новости), можешь предложить кнопку:\n' +
+    '   - "durak": Дурак Империя (картишки)\n' +
+    '   - "slots": Forest Fortune 5x5 (слоты)\n' +
+    '   - "forest": Forest Fortune Classic\n' +
+    '   - "roger": Lucky Rodger Slot (пиратский слот)\n' +
+    '   - "empire": Khutor Empire (империя хутора)\n' +
+    '   - "ifield_studio": iField Studio\n' +
+    '   - "ifield_chat": iField Chat\n' +
+    '   - "news": свежая новость дня\n' +
+    '   - "studio": открыть нашу Zombie Студию\n' +
     '   - "cookie": угостить диджеев печеньем\n' +
-    '   - "none": если кнопка сейчас не нужна (чаще всего используй "none" в обычной болтовне!).\n' +
-    'Верни СТРОГО JSON формата: {"persona":"zombie"|"kolya","reply":"текст ответа","cta":"none"|"durak"|"slots"|"roger"|"music"|"news"|"studio"|"cookie"}.';
+    '   - "none": если кнопка сейчас не нужна (чаще используй "none" в обычной болтовне!).\n' +
+    'Верни СТРОГО JSON формата: {"persona":"zombie"|"kolya","reply":"текст ответа","cta":"none"|"durak"|"slots"|"forest"|"roger"|"empire"|"ifield_studio"|"ifield_chat"|"news"|"studio"|"cookie"}.';
 
   const prompt =
     'Последние реплики:\n' + history + '\n\nТекущее сообщение от ' + authorName + ':\n' + currentText;
@@ -876,17 +988,29 @@ function buildCtaMarkup(env, origin, cta, isPrivate) {
   const eco = getEcosystem(env);
   if (!cta || cta === 'none') return undefined;
 
-  if (cta === 'durak') {
-    return { inline_keyboard: [[{ text: '🃏 Срубить в Дурака', url: eco.projects[1].url }]] };
+  const byId = {};
+  for (const p of eco.projects) byId[p.id] = p;
+
+  if (cta === 'slots' && byId.forest5x5) {
+    return { inline_keyboard: [[{ text: '🌲 ' + byId.forest5x5.name, url: byId.forest5x5.url }]] };
   }
-  if (cta === 'slots') {
-    return { inline_keyboard: [[{ text: '🌲 Forest Fortune 5x5', url: eco.projects[0].url }]] };
+  if (cta === 'durak' && byId.durak) {
+    return { inline_keyboard: [[{ text: '🃏 ' + byId.durak.name, url: byId.durak.url }]] };
   }
-  if (cta === 'roger') {
-    return { inline_keyboard: [[{ text: '🏴‍☠️ Lucky Roger Slot', url: eco.projects[2].url }]] };
+  if (cta === 'roger' && byId.roger) {
+    return { inline_keyboard: [[{ text: '🏴‍☠️ ' + byId.roger.name, url: byId.roger.url }]] };
   }
-  if (cta === 'music') {
-    return { inline_keyboard: [[{ text: '🎛 iField Music Lab', url: eco.projects[3].url }]] };
+  if (cta === 'empire' && byId.empire) {
+    return { inline_keyboard: [[{ text: '🏰 ' + byId.empire.name, url: byId.empire.url }]] };
+  }
+  if (cta === 'forest' && byId.forest) {
+    return { inline_keyboard: [[{ text: '🌿 ' + byId.forest.name, url: byId.forest.url }]] };
+  }
+  if (cta === 'ifield_studio' && byId.studio) {
+    return { inline_keyboard: [[{ text: '🎛 ' + byId.studio.name, url: byId.studio.url }]] };
+  }
+  if (cta === 'ifield_chat' && byId.chat) {
+    return { inline_keyboard: [[{ text: '💬 ' + byId.chat.name, url: byId.chat.url }]] };
   }
   if (cta === 'news') {
     return {
@@ -999,15 +1123,21 @@ async function sendGroupNews(env, chatId, origin, isPrivate) {
 
 async function sendGamesMenu(env, chatId, isPrivate, origin) {
   const eco = getEcosystem(env);
+  const p = eco.projects;
   const rows = [
     [
-      { text: '🌲 ' + eco.projects[0].name, url: eco.projects[0].url },
-      { text: '🃏 ' + eco.projects[1].name, url: eco.projects[1].url },
+      { text: '🌲 ' + p[0].name, url: p[0].url },
+      { text: '🃏 ' + p[1].name, url: p[1].url },
     ],
     [
-      { text: '🏴‍☠️ ' + eco.projects[2].name, url: eco.projects[2].url },
-      { text: '🎛 ' + eco.projects[3].name, url: eco.projects[3].url },
+      { text: '🏴‍☠️ ' + p[2].name, url: p[2].url },
+      { text: '🏰 ' + p[3].name, url: p[3].url },
     ],
+    [
+      { text: '🌿 ' + p[4].name, url: p[4].url },
+      { text: '🎛 ' + p[5].name, url: p[5].url },
+    ],
+    [{ text: '💬 ' + p[6].name, url: p[6].url }],
   ];
   if (isPrivate) {
     rows.push([{ text: '🎙 Открыть Zombie Студию', web_app: { url: origin + '/' } }]);
@@ -1017,7 +1147,7 @@ async function sendGamesMenu(env, chatId, isPrivate, origin) {
 
   await tgCall(env, 'sendMessage', {
     chat_id: chatId,
-    text: '🎮 <b>Игры и проекты экосистемы i-Field:</b>\nВыбирай, во что влетаем прямо сейчас!',
+    text: '🎮 <b>Все боты и игры экосистемы i-Field:</b>\nВыбирай куда залетаем прямо сейчас!',
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard: rows },
   });
@@ -1125,7 +1255,7 @@ async function runNewsEdition(env, opts) {
     inline_keyboard: [
       [
         { text: '🎛 Слушать в Студии', url: eco.botUrl },
-        { text: '🎮 Игры', url: eco.projects[0].url },
+        { text: '🌲 Forest 5x5', url: eco.projects[0].url },
       ],
     ],
   };
