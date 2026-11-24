@@ -34,7 +34,28 @@ const RSS_FEEDS = {
   ]
 };
 
-const GEMINI_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+const COOKIE_PACKS = {
+  cookie_15: {
+    stars: 15,
+    title: 'Пончик для Zombie-DJ',
+    btn: '🍩 Пончик (15 ⭐)',
+    desc: 'Хрустящий неоновый пончик за крутой бит и панчи в эфире.'
+  },
+  cookie_50: {
+    stars: 50,
+    title: 'Пачка печенья в студию',
+    btn: '🍪 Пачка печенья (50 ⭐)',
+    desc: 'На чай, кофе и новые струны для гитары Дяди Коли Мертвеца.'
+  },
+  cookie_150: {
+    stars: 150,
+    title: 'Ящик пончиков и струн',
+    btn: '🎁 Ящик вкусняшек (150 ⭐)',
+    desc: 'VIP-донат диджеям на печенье, тосол и топливо для нейросети.'
+  }
+};
+
+const GEMINI_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
 
 export default {
   async fetch(request, env, ctx) {
@@ -65,7 +86,7 @@ export default {
     }
 
     if (url.pathname === '/' && request.method === 'GET') {
-      return new Response(renderHomeHtml(), {
+      return new Response(renderHomeHtml(env), {
         status: 200,
         headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300' }
       });
@@ -79,7 +100,20 @@ export default {
   }
 };
 
-function renderHomeHtml() {
+function getBotUsername(env) {
+  return String(env.BOT_USERNAME || 'zombie_rap_news_bot').replace(/^@/, '');
+}
+
+function channelPostKeyboard(env) {
+  return {
+    inline_keyboard: [[
+      { text: '🍩 Диджеям на печенье', url: `https://t.me/${getBotUsername(env)}?start=cookie` }
+    ]]
+  };
+}
+
+function renderHomeHtml(env) {
+  const botUsername = getBotUsername(env);
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -135,6 +169,7 @@ function renderHomeHtml() {
   }
   .btn:active{transform:scale(.98)}
   .btn-main{background:linear-gradient(135deg,var(--acid),#1fe080);color:#04150c;box-shadow:0 8px 26px rgba(66,255,158,.22)}
+  .btn-cookie{background:linear-gradient(135deg,var(--gold),#ff9f43);color:#1f1202;box-shadow:0 8px 26px rgba(255,207,92,.2)}
   .btn-sec{background:var(--card);color:var(--text);border:1px solid var(--line)}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:14px}
   .card{
@@ -173,8 +208,9 @@ function renderHomeHtml() {
     </p>
 
     <div class="cta">
-      <a class="btn btn-main" href="https://t.me/zombie_news_flava" target="_blank" rel="noopener">📢 Читать канал @zombie_news_flava</a>
-      <a class="btn btn-sec" href="https://t.me/zombie_rap_news_bot" target="_blank" rel="noopener">🎛 Бот-пульт @zombie_rap_news_bot</a>
+      <a class="btn btn-main" href="https://t.me/zombie_news_flava" target="_blank" rel="noopener">📢 Читать @zombie_news_flava</a>
+      <a class="btn btn-cookie" href="https://t.me/${escHtml(botUsername)}?start=cookie" target="_blank" rel="noopener">🍩 Диджеям на печенье</a>
+      <a class="btn btn-sec" href="https://t.me/${escHtml(botUsername)}" target="_blank" rel="noopener">🎛 Бот</a>
     </div>
 
     <section class="grid">
@@ -322,16 +358,18 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
 }
 
 async function loadState(kv) {
-  if (!kv) return { sent: [], lastCategory: '', lastStyle: '', cronMode: 'auto' };
+  if (!kv) return { sent: [], lastCategory: '', lastStyle: '', cronMode: 'auto', cookiesTotal: 0, cookiesCount: 0 };
   const raw = await kv.get('state:history', 'json');
   if (!raw || typeof raw !== 'object') {
-    return { sent: [], lastCategory: '', lastStyle: '', cronMode: 'auto' };
+    return { sent: [], lastCategory: '', lastStyle: '', cronMode: 'auto', cookiesTotal: 0, cookiesCount: 0 };
   }
   return {
     sent: Array.isArray(raw.sent) ? raw.sent.slice(-MAX_HISTORY) : [],
     lastCategory: String(raw.lastCategory || ''),
     lastStyle: String(raw.lastStyle || ''),
-    cronMode: raw.cronMode === 'draft' ? 'draft' : 'auto'
+    cronMode: raw.cronMode === 'draft' ? 'draft' : 'auto',
+    cookiesTotal: Number(raw.cookiesTotal) || 0,
+    cookiesCount: Number(raw.cookiesCount) || 0
   };
 }
 
@@ -341,7 +379,9 @@ async function saveState(kv, state) {
     sent: Array.isArray(state.sent) ? state.sent.slice(-MAX_HISTORY) : [],
     lastCategory: state.lastCategory || '',
     lastStyle: state.lastStyle || '',
-    cronMode: state.cronMode === 'draft' ? 'draft' : 'auto'
+    cronMode: state.cronMode === 'draft' ? 'draft' : 'auto',
+    cookiesTotal: Number(state.cookiesTotal) || 0,
+    cookiesCount: Number(state.cookiesCount) || 0
   };
   await kv.put('state:history', JSON.stringify(clean));
 }
@@ -406,7 +446,7 @@ function chooseStyle(state, forcedStyle = null) {
   return STYLES[(idx + 1) % STYLES.length];
 }
 
-function buildGeminiPayload(news, style) {
+function buildGeminiPayload(news, style, useSchema = true) {
   const stylePrompt = style === 'rap'
     ? `Формат "rap" — дерзкий киберпанк-рэп от лица 🧟‍♂️ Zombie-DJ.
 Напиши 6 плотных рифмованных строк (AABB или ABAB) с уличным сленгом, битом и чёрным юмором.`
@@ -419,7 +459,7 @@ function buildGeminiPayload(news, style) {
 
   const systemInstruction = `Ты креативный редактор сатирического Telegram-канала "Zombie News Flava".
 Превращаешь реальные новости в яркие посты в стиле Zombie Rap и Кибер-Шансон на русском языке.
-Отвечай СТРОГО JSON-объектом без markdown-обёрток.`;
+Отвечай СТРОГО одним JSON-объектом без markdown-обёрток.`;
 
   const userPrompt = `Реальная новость (${CATEGORY_LABELS[news.category] || news.category}):
 Заголовок: "${news.title}"
@@ -427,71 +467,111 @@ function buildGeminiPayload(news, style) {
 
 ${stylePrompt}
 
-Верни JSON с полями:
-- headline_ru: цепляющий, живой заголовок новости на русском (до 85 символов, точно передаёт суть).
-- summary_ru: 1–2 коротких предложения по-русски — что именно произошло, простым языком (до 180 символов).
-- lyrics: текст трека/баттла на русском (строго до 520 символов, с эмодзи персонажей и переносами строк).
-- image_prompt: детальный визуальный промпт НА АНГЛИЙСКОМ для генерации обложки (без слов и текста на картинке!), где сюжет новости обыгран с персонажем (${style === 'chanson' ? 'undead cyberpunk chanson singer with rusty acoustic guitar in neon dive bar' : 'undead cyberpunk zombie rapper with glowing headphones and microphone'}), стиль: dark neon synthwave illustration, cinematic lighting, high contrast.`;
+Верни JSON с ключами:
+- "headline_ru": цепляющий, живой заголовок новости на русском (до 85 символов, точно передаёт суть).
+- "summary_ru": 1–2 коротких предложения по-русски — что именно произошло, простым языком (до 180 символов).
+- "lyrics": текст трека/баттла на русском (строго до 520 символов, с эмодзи персонажей и переносами строк).
+- "image_prompt": детальный визуальный промпт НА АНГЛИЙСКОМ для генерации обложки (без слов и текста на картинке!), где сюжет новости обыгран с персонажем (${style === 'chanson' ? 'undead cyberpunk chanson singer with rusty acoustic guitar in neon dive bar' : 'undead cyberpunk zombie rapper with glowing headphones and microphone'}), стиль: dark neon synthwave illustration, cinematic lighting, high contrast.`;
+
+  const generationConfig = { responseMimeType: 'application/json' };
+  if (useSchema) {
+    generationConfig.responseSchema = {
+      type: 'OBJECT',
+      properties: {
+        headline_ru: { type: 'STRING' },
+        summary_ru: { type: 'STRING' },
+        lyrics: { type: 'STRING' },
+        image_prompt: { type: 'STRING' }
+      },
+      required: ['headline_ru', 'summary_ru', 'lyrics', 'image_prompt']
+    };
+  }
 
   return {
     systemInstruction: { parts: [{ text: systemInstruction }] },
-    contents: [{ parts: [{ text: userPrompt }] }],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'OBJECT',
-        properties: {
-          headline_ru: { type: 'STRING' },
-          summary_ru: { type: 'STRING' },
-          lyrics: { type: 'STRING' },
-          image_prompt: { type: 'STRING' }
-        },
-        required: ['headline_ru', 'summary_ru', 'lyrics', 'image_prompt']
-      }
-    }
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    generationConfig
   };
 }
 
+function parseGeminiJson(rawText) {
+  const cleaned = String(rawText || '').replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  const parsed = JSON.parse(match ? match[0] : cleaned);
+  return parsed && parsed.headline_ru && parsed.lyrics ? parsed : null;
+}
+
+async function listAvailableGeminiModels(apiKey) {
+  try {
+    const res = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models', {
+      headers: { 'x-goog-api-key': apiKey }
+    }, 8000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.models || [])
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((name) => name.includes('gemini'))
+      .slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 async function generatePostWithGemini(env, news, style) {
-  if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY не задан');
-  const models = env.GEMINI_MODEL ? [env.GEMINI_MODEL, ...GEMINI_MODELS.filter((m) => m !== env.GEMINI_MODEL)] : GEMINI_MODELS;
-  const payload = buildGeminiPayload(news, style);
-  let lastError = 'Неизвестная ошибка Gemini';
+  const apiKey = String(env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) throw new Error('GEMINI_API_KEY не задан');
+  const custom = String(env.GEMINI_MODEL || '').trim();
+  const models = custom ? [custom, ...GEMINI_MODELS.filter((m) => m !== custom)] : GEMINI_MODELS;
+  const errors = [];
+  let saw404 = false;
 
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-    try {
-      const res = await fetchWithTimeout(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': env.GEMINI_API_KEY
-        },
-        body: JSON.stringify(payload)
-      }, 25000);
 
-      if (res.ok) {
-        const data = await res.json();
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const cleaned = rawText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-        const parsed = JSON.parse(cleaned);
-        if (parsed && parsed.headline_ru && parsed.lyrics) {
-          return parsed;
+    for (const useSchema of [true, false]) {
+      try {
+        const res = await fetchWithTimeout(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey
+          },
+          body: JSON.stringify(buildGeminiPayload(news, style, useSchema))
+        }, 25000);
+
+        if (res.ok) {
+          const data = await res.json();
+          const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          const parsed = parseGeminiJson(rawText);
+          if (parsed) return parsed;
+          errors.push(`${model}: неверный JSON ответа`);
+          break;
         }
-        lastError = `${model}: пустой JSON`;
-      } else {
+
         const errBody = await res.text();
-        lastError = `${model} (${res.status}): ${errBody.slice(0, 120)}`;
+        errors.push(`${model} (${res.status}): ${errBody.slice(0, 120)}`);
+        if (res.status === 404) saw404 = true;
+        if (res.status === 400 && useSchema) continue;
         if ([429, 500, 503].includes(res.status) && i < models.length - 1) {
           await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 800)));
         }
+        break;
+      } catch (e) {
+        errors.push(`${model}: ${e.message}`);
+        break;
       }
-    } catch (e) {
-      lastError = `${model}: ${e.message}`;
     }
   }
-  throw new Error(lastError);
+
+  if (saw404) {
+    const avail = await listAvailableGeminiModels(apiKey);
+    if (avail.length) {
+      errors.push(`Доступные модели ключа: ${avail.join(', ')}`);
+    }
+  }
+  throw new Error(errors.join('\n'));
 }
 
 function base64ToArrayBuffer(b64) {
@@ -530,17 +610,18 @@ async function generateCoverImage(env, prompt) {
     } catch {}
   }
 
-  if (env.GEMINI_API_KEY) {
+  const apiKey = String(env.GEMINI_API_KEY || '').trim();
+  if (apiKey) {
     try {
       const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent';
       const res = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': env.GEMINI_API_KEY
+          'x-goog-api-key': apiKey
         },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: cleanPrompt }] }],
+          contents: [{ role: 'user', parts: [{ text: cleanPrompt }] }],
           generationConfig: { responseModalities: ['IMAGE'] }
         })
       }, 20000);
@@ -630,6 +711,22 @@ async function notifyAdmin(env, text) {
   } catch {}
 }
 
+async function sendCookieMenu(botToken, chatId) {
+  await tgCall(botToken, 'sendMessage', {
+    chat_id: chatId,
+    text: '🍩 <b>Диджеям на печенье</b>\n\nZombie-DJ и Дядя Коля Мертвец крутят эфир 24/7 без выходных.\nВыбери угощение за Telegram Stars — бот сразу выставит чек:',
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: COOKIE_PACKS.cookie_15.btn, callback_data: 'tip:cookie_15' }],
+        [{ text: COOKIE_PACKS.cookie_50.btn, callback_data: 'tip:cookie_50' }],
+        [{ text: COOKIE_PACKS.cookie_150.btn, callback_data: 'tip:cookie_150' }],
+        [{ text: '📢 Вернуться в @zombie_news_flava', url: 'https://t.me/zombie_news_flava' }]
+      ]
+    }
+  });
+}
+
 async function runScheduled(env) {
   const state = await loadState(env.NEWS_KV);
   await runPipeline(env, { toAdminDraft: state.cronMode === 'draft' });
@@ -692,7 +789,13 @@ async function runPipeline(env, opts = {}) {
     return { ok: Boolean(res.ok), mode: 'draft', style, category: news.category, hasImage: Boolean(imageObj) };
   }
 
-  const sendRes = await sendPostToChat(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, caption, imageObj);
+  const sendRes = await sendPostToChat(
+    env.TELEGRAM_BOT_TOKEN,
+    env.TELEGRAM_CHAT_ID,
+    caption,
+    imageObj,
+    channelPostKeyboard(env)
+  );
   if (sendRes.ok) {
     state.sent.push(news.id);
     state.lastCategory = news.category;
@@ -719,7 +822,8 @@ function adminKeyboard(cronMode) {
           text: cronMode === 'draft' ? '⏰ Крон: черновик в ЛС (сменить)' : '⏰ Крон: автопост в канал (сменить)',
           callback_data: 'toggle_cron'
         }
-      ]
+      ],
+      [{ text: '🍩 Диджеям на печенье (тест)', callback_data: 'cookie_menu' }]
     ]
   };
 }
@@ -733,10 +837,11 @@ async function handleSetup(request, env) {
   const wh = await tgCall(env.TELEGRAM_BOT_TOKEN, 'setWebhook', {
     url: `${origin}/telegram-webhook`,
     secret_token: whSecret,
-    allowed_updates: ['message', 'callback_query']
+    allowed_updates: ['message', 'callback_query', 'pre_checkout_query']
   });
   const cmds = await tgCall(env.TELEGRAM_BOT_TOKEN, 'setMyCommands', {
     commands: [
+      { command: 'cookie', description: '🍩 Диджеям на печенье' },
       { command: 'menu', description: '🎛 Пульт управления' },
       { command: 'draft', description: '🎲 Черновик случайной новости' },
       { command: 'rap', description: '🎤 Черновик Zombie Rap' },
@@ -764,25 +869,64 @@ async function handleWebhook(request, env, ctx) {
 
   const upd = await request.json().catch(() => ({}));
 
-  if (upd.callback_query) {
-    const cq = upd.callback_query;
-    const fromId = String(cq.from?.id || '');
-    if (!env.ADMIN_CHAT_ID || fromId !== String(env.ADMIN_CHAT_ID)) {
-      ctx.waitUntil(tgCall(env.TELEGRAM_BOT_TOKEN, 'answerCallbackQuery', {
-        callback_query_id: cq.id,
-        text: 'Доступ только для администратора канала',
-        show_alert: true
-      }));
-      return jsonResp({ ok: true });
-    }
-    ctx.waitUntil(processCallback(env, cq));
+  if (upd.pre_checkout_query) {
+    const q = upd.pre_checkout_query;
+    let valid = false;
+    try {
+      const p = JSON.parse(q.invoice_payload);
+      const pkg = COOKIE_PACKS[p.pkg];
+      valid = Boolean(pkg && q.currency === 'XTR' && q.total_amount === pkg.stars);
+    } catch {}
+    await tgCall(env.TELEGRAM_BOT_TOKEN, 'answerPreCheckoutQuery', {
+      pre_checkout_query_id: q.id,
+      ok: valid,
+      ...(valid ? {} : { error_message: 'Некорректное угощение или сумма Stars.' })
+    });
     return jsonResp({ ok: true });
   }
 
   const msg = upd.message;
+  if (msg && msg.successful_payment && msg.chat) {
+    ctx.waitUntil(processSuccessfulCookiePayment(env, msg));
+    return jsonResp({ ok: true });
+  }
+
+  if (upd.callback_query) {
+    const cq = upd.callback_query;
+    const data = String(cq.data || '');
+
+    if (data === 'cookie_menu' || data.startsWith('tip:')) {
+      ctx.waitUntil(processPublicCallback(env, cq));
+      return jsonResp({ ok: true });
+    }
+
+    const fromId = String(cq.from?.id || '');
+    if (!env.ADMIN_CHAT_ID || fromId !== String(env.ADMIN_CHAT_ID)) {
+      ctx.waitUntil(tgCall(env.TELEGRAM_BOT_TOKEN, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: 'Эта кнопка только для администратора канала',
+        show_alert: true
+      }));
+      return jsonResp({ ok: true });
+    }
+    ctx.waitUntil(processAdminCallback(env, cq));
+    return jsonResp({ ok: true });
+  }
+
   if (msg && msg.chat && msg.text) {
     const chatId = String(msg.chat.id);
     const text = msg.text.trim();
+    const isAdmin = Boolean(env.ADMIN_CHAT_ID && chatId === String(env.ADMIN_CHAT_ID));
+
+    if (/^\/start(?:\s+cookie)?$/i.test(text) && /cookie$/i.test(text)) {
+      ctx.waitUntil(sendCookieMenu(env.TELEGRAM_BOT_TOKEN, chatId));
+      return jsonResp({ ok: true });
+    }
+
+    if (/^\/(cookie|donate|pechene)/i.test(text)) {
+      ctx.waitUntil(sendCookieMenu(env.TELEGRAM_BOT_TOKEN, chatId));
+      return jsonResp({ ok: true });
+    }
 
     if (!env.ADMIN_CHAT_ID) {
       ctx.waitUntil(tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
@@ -793,7 +937,18 @@ async function handleWebhook(request, env, ctx) {
       return jsonResp({ ok: true });
     }
 
-    if (chatId !== String(env.ADMIN_CHAT_ID)) {
+    if (!isAdmin) {
+      ctx.waitUntil(tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '🧟‍♂️ <b>Йо, на связи Zombie-DJ и Дядя Коля!</b>\n\nСвежие выпуски и рэп-баттлы по горячим новостям выходят в нашем канале.\nА если бит зашёл — можешь подкинуть нам на печенье и гитарные струны!',
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📢 Читать @zombie_news_flava', url: 'https://t.me/zombie_news_flava' }],
+            [{ text: '🍩 Диджеям на печенье', callback_data: 'cookie_menu' }]
+          ]
+        }
+      }));
       return jsonResp({ ok: true });
     }
 
@@ -803,19 +958,85 @@ async function handleWebhook(request, env, ctx) {
   return jsonResp({ ok: true });
 }
 
+async function processSuccessfulCookiePayment(env, msg) {
+  const pay = msg.successful_payment;
+  const chatId = String(msg.chat.id);
+  const chargeId = String(pay.telegram_payment_charge_id || '');
+  try {
+    const p = JSON.parse(pay.invoice_payload);
+    const pkg = COOKIE_PACKS[p.pkg];
+    if (!pkg || pay.currency !== 'XTR' || pay.total_amount !== pkg.stars) return;
+
+    if (env.NEWS_KV && chargeId) {
+      if (await env.NEWS_KV.get(`pay:${chargeId}`)) return;
+      await env.NEWS_KV.put(`pay:${chargeId}`, chatId);
+    }
+
+    const state = await loadState(env.NEWS_KV);
+    state.cookiesTotal += pkg.stars;
+    state.cookiesCount += 1;
+    await saveState(env.NEWS_KV, state);
+
+    await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `🍩 <b>Респект от всей студии!</b>\n\n🧟‍♂️ Zombie-DJ уже хрустит пончиком, а 🎸 Дядя Коля настраивает провода!\nУгощение <b>«${escHtml(pkg.title)}» (${pkg.stars} ⭐)</b> доставлено в эфир.`,
+      parse_mode: 'HTML'
+    });
+
+    const fromUser = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || chatId);
+    if (env.ADMIN_CHAT_ID && chatId !== String(env.ADMIN_CHAT_ID)) {
+      await notifyAdmin(env, `🍩 Донат диджеям на печенье! ${fromUser} закинул ${pkg.stars} ⭐ («${pkg.title}»). Всего собрано: ${state.cookiesTotal} ⭐.`);
+    }
+  } catch {}
+}
+
+async function processPublicCallback(env, cq) {
+  const data = String(cq.data || '');
+  const chatId = String(cq.message?.chat?.id || cq.from?.id || '');
+  await tgCall(env.TELEGRAM_BOT_TOKEN, 'answerCallbackQuery', { callback_query_id: cq.id });
+
+  if (data === 'cookie_menu') {
+    await sendCookieMenu(env.TELEGRAM_BOT_TOKEN, chatId);
+    return;
+  }
+
+  if (data.startsWith('tip:')) {
+    const pkgId = data.slice(4);
+    const pkg = COOKIE_PACKS[pkgId];
+    if (!pkg || !chatId) return;
+
+    const invRes = await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendInvoice', {
+      chat_id: chatId,
+      title: pkg.title,
+      description: pkg.desc,
+      payload: JSON.stringify({ uid: String(cq.from?.id || chatId), pkg: pkgId }),
+      provider_token: '',
+      currency: 'XTR',
+      prices: [{ label: pkg.title, amount: pkg.stars }]
+    });
+
+    if (!invRes.ok) {
+      await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ Не удалось выставить счёт Stars: ${invRes.description || 'попробуйте позже'}`
+      });
+    }
+  }
+}
+
 async function processAdminCommand(env, chatId, text) {
   const state = await loadState(env.NEWS_KV);
   if (/^\/(start|menu)/i.test(text)) {
     await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
       chat_id: chatId,
-      text: `🧟‍♂️ <b>Zombie News Flava — Пульт</b>\nКанал: ${escHtml(env.TELEGRAM_CHAT_ID)}\nОбложки AI: <b>${env.AI ? '⚡ Подключён' : '⚠️ Нет привязки [ai]'}</b>\nРежим крона: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
+      text: `🧟‍♂️ <b>Zombie News Flava — Пульт</b>\nКанал: ${escHtml(env.TELEGRAM_CHAT_ID)}\nОбложки AI: <b>${env.AI ? '⚡ Подключён' : '⚠️ Нет привязки [ai]'}</b>\nРежим крона: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>\nПеченье: <b>${state.cookiesTotal} ⭐</b>`,
       parse_mode: 'HTML',
       reply_markup: adminKeyboard(state.cronMode)
     });
   } else if (/^\/status/i.test(text)) {
     await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', {
       chat_id: chatId,
-      text: `📊 <b>Статус</b>\nВ истории новостей: <b>${state.sent.length}</b>\nПоследняя рубрика: <b>${CATEGORY_LABELS[state.lastCategory] || '—'}</b>\nПоследний стиль: <b>${STYLE_LABELS[state.lastStyle] || '—'}</b>\nОбложки (Workers AI): <b>${env.AI ? '⚡ Активно' : '❌ Не привязан'}</b>\nКрон: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>`,
+      text: `📊 <b>Статус</b>\nВ истории новостей: <b>${state.sent.length}</b>\nПоследняя рубрика: <b>${CATEGORY_LABELS[state.lastCategory] || '—'}</b>\nПоследний стиль: <b>${STYLE_LABELS[state.lastStyle] || '—'}</b>\nОбложки (Workers AI): <b>${env.AI ? '⚡ Активно' : '❌ Не привязан'}</b>\nКрон: <b>${state.cronMode === 'draft' ? 'Черновик в ЛС' : 'Автопост в канал'}</b>\nСобрано на печенье: <b>${state.cookiesTotal} ⭐ (${state.cookiesCount} шт.)</b>`,
       parse_mode: 'HTML',
       reply_markup: adminKeyboard(state.cronMode)
     });
@@ -829,7 +1050,7 @@ async function processAdminCommand(env, chatId, text) {
   }
 }
 
-async function processCallback(env, cq) {
+async function processAdminCallback(env, cq) {
   const data = String(cq.data || '');
   const chatId = String(cq.message?.chat?.id || env.ADMIN_CHAT_ID);
   const msgId = cq.message?.message_id;
@@ -865,7 +1086,13 @@ async function processCallback(env, cq) {
       await tgCall(env.TELEGRAM_BOT_TOKEN, 'sendMessage', { chat_id: chatId, text: '⚠️ Черновик устарел. Сделай новый через /draft' });
       return;
     }
-    const res = await sendPostToChat(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, draft.caption, draft.photoFileId);
+    const res = await sendPostToChat(
+      env.TELEGRAM_BOT_TOKEN,
+      env.TELEGRAM_CHAT_ID,
+      draft.caption,
+      draft.photoFileId,
+      channelPostKeyboard(env)
+    );
     if (res.ok) {
       const state = await loadState(env.NEWS_KV);
       state.sent.push(draft.news.id);
