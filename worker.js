@@ -69,6 +69,10 @@ export default {
       return await handleWebhook(request, env, ctx);
     }
 
+    if (url.pathname === '/api/cookie-invoice' && request.method === 'POST') {
+      return await handleCookieInvoice(request, env);
+    }
+
     if (url.pathname === '/setup' && request.method === 'GET') {
       return await handleSetup(request, env);
     }
@@ -121,6 +125,7 @@ function renderHomeHtml(env) {
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Zombie News Flava — Zombie Rap & Кибер-Шансон</title>
 <meta name="description" content="Сатирическое AI-медиа в Telegram: мировые, крипто, техно и шоу-биз новости в стиле Zombie Rap и Кибер-Шансон.">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root{
     --bg:#06070c;
@@ -161,16 +166,40 @@ function renderHomeHtml(env) {
   }
   h1 span{color:var(--gold)}
   .lead{margin:0 0 22px;color:var(--muted);font-size:15px;line-height:1.55}
-  .cta{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:26px}
+  .cta{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}
   .btn{
     display:inline-flex;align-items:center;justify-content:center;gap:8px;
     padding:13px 18px;border-radius:14px;font-size:15px;font-weight:700;
-    text-decoration:none;transition:transform .15s ease,opacity .15s ease;
+    text-decoration:none;border:none;cursor:pointer;font-family:inherit;
+    transition:transform .15s ease,opacity .15s ease;
   }
   .btn:active{transform:scale(.98)}
   .btn-main{background:linear-gradient(135deg,var(--acid),#1fe080);color:#04150c;box-shadow:0 8px 26px rgba(66,255,158,.22)}
   .btn-cookie{background:linear-gradient(135deg,var(--gold),#ff9f43);color:#1f1202;box-shadow:0 8px 26px rgba(255,207,92,.2)}
   .btn-sec{background:var(--card);color:var(--text);border:1px solid var(--line)}
+  .cookie-box{
+    display:none;
+    margin-bottom:16px;
+    background:rgba(20,17,10,.92);
+    border:1px solid rgba(255,207,92,.45);
+    border-radius:18px;
+    padding:14px;
+  }
+  .cookie-box.open{display:block}
+  .cookie-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .cookie-head b{color:var(--gold);font-size:15px}
+  .cookie-close{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px 8px}
+  .cookie-list{display:grid;gap:8px}
+  .pack-btn{
+    width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;
+    padding:12px 14px;border-radius:12px;border:1px solid #352b14;
+    background:#12100a;color:#fff;font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;
+    text-align:left;
+  }
+  .pack-btn span{font-size:12px;font-weight:500;color:#b8ab8a;display:block;margin-top:2px}
+  .pack-price{background:rgba(255,207,92,.15);color:var(--gold);padding:6px 10px;border-radius:10px;white-space:nowrap;font-size:13px}
+  .cookie-msg{margin-top:10px;font-size:13px;color:var(--acid);display:none}
+  .cookie-msg.err{color:var(--pink)}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:14px}
   .card{
     background:rgba(14,17,27,.86);
@@ -208,10 +237,32 @@ function renderHomeHtml(env) {
     </p>
 
     <div class="cta">
-      <a class="btn btn-main" href="https://t.me/zombie_news_flava" target="_blank" rel="noopener">📢 Читать @zombie_news_flava</a>
-      <a class="btn btn-cookie" href="https://t.me/${escHtml(botUsername)}?start=cookie" target="_blank" rel="noopener">🍩 Диджеям на печенье</a>
-      <a class="btn btn-sec" href="https://t.me/${escHtml(botUsername)}" target="_blank" rel="noopener">🎛 Бот</a>
+      <a class="btn btn-main tg-link" href="https://t.me/zombie_news_flava">📢 Читать @zombie_news_flava</a>
+      <button type="button" class="btn btn-cookie" id="cookieToggle">🍩 Диджеям на печенье</button>
+      <a class="btn btn-sec tg-link" href="https://t.me/${escHtml(botUsername)}">🎛 Бот</a>
     </div>
+
+    <section class="cookie-box" id="cookieBox">
+      <div class="cookie-head">
+        <b>🍩 Угостить студию за Telegram Stars</b>
+        <button type="button" class="cookie-close" id="cookieClose">✕</button>
+      </div>
+      <div class="cookie-list">
+        <button type="button" class="pack-btn" data-pkg="cookie_15">
+          <div>Пончик для Zombie-DJ<span>За плотный бит и жёсткие панчи</span></div>
+          <div class="pack-price">15 ⭐</div>
+        </button>
+        <button type="button" class="pack-btn" data-pkg="cookie_50">
+          <div>Пачка печенья в студию<span>На чай и новые струны Дяде Коле</span></div>
+          <div class="pack-price">50 ⭐</div>
+        </button>
+        <button type="button" class="pack-btn" data-pkg="cookie_150">
+          <div>Ящик пончиков и струн<span>VIP-поддержка эфира и нейросети</span></div>
+          <div class="pack-price">150 ⭐</div>
+        </button>
+      </div>
+      <div class="cookie-msg" id="cookieMsg"></div>
+    </section>
 
     <section class="grid">
       <div class="card">
@@ -245,6 +296,82 @@ function renderHomeHtml(env) {
       <span>@zombie_news_flava</span>
     </footer>
   </main>
+
+  <script>
+    (function () {
+      var tg = window.Telegram && window.Telegram.WebApp;
+      if (tg) {
+        tg.ready();
+        tg.expand();
+      }
+
+      document.querySelectorAll('.tg-link').forEach(function (el) {
+        el.addEventListener('click', function (e) {
+          var href = el.getAttribute('href');
+          if (tg && tg.openTelegramLink && href) {
+            e.preventDefault();
+            tg.openTelegramLink(href);
+          }
+        });
+      });
+
+      var box = document.getElementById('cookieBox');
+      var msg = document.getElementById('cookieMsg');
+      var toggle = document.getElementById('cookieToggle');
+      var closeBtn = document.getElementById('cookieClose');
+
+      function showMsg(text, isErr) {
+        msg.textContent = text;
+        msg.className = isErr ? 'cookie-msg err' : 'cookie-msg';
+        msg.style.display = 'block';
+      }
+
+      toggle.addEventListener('click', function () {
+        box.classList.toggle('open');
+      });
+      closeBtn.addEventListener('click', function () {
+        box.classList.remove('open');
+      });
+
+      document.querySelectorAll('.pack-btn').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var pkgId = btn.getAttribute('data-pkg');
+          if (!tg || !tg.openInvoice) {
+            window.location.href = 'https://t.me/${escHtml(botUsername)}?start=cookie';
+            return;
+          }
+          btn.disabled = true;
+          showMsg('Создаём чек Telegram Stars...', false);
+          try {
+            var res = await fetch('/api/cookie-invoice', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pkgId: pkgId, initData: tg.initData || '' })
+            });
+            var data = await res.json();
+            if (!data.ok || !data.invoiceLink) {
+              showMsg(data.error || 'Не удалось создать счёт', true);
+              btn.disabled = false;
+              return;
+            }
+            tg.openInvoice(data.invoiceLink, function (status) {
+              btn.disabled = false;
+              if (status === 'paid') {
+                showMsg('🍩 Респект! Печенье доставлено Zombie-DJ и Дяде Коле!', false);
+              } else if (status === 'cancelled') {
+                showMsg('Отменено — можно угостить в любой момент.', false);
+              } else {
+                showMsg('Оплата не завершена: ' + status, true);
+              }
+            });
+          } catch (err) {
+            btn.disabled = false;
+            showMsg('Ошибка сети, попробуй открыть /cookie в боте', true);
+          }
+        });
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
@@ -266,6 +393,31 @@ async function hmacHex(salt, secret) {
   );
   const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(String(secret || '')));
   return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacRaw(keyBytes, message) {
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+}
+
+async function verifyTelegramInitData(initData, botToken) {
+  if (!initData || !botToken) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash) return null;
+  params.delete('hash');
+  const entries = Array.from(params.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const checkStr = entries.map(([k, v]) => `${k}=${v}`).join('\n');
+  const secretKey = await hmacRaw(new TextEncoder().encode('WebAppData'), botToken);
+  const sig = await hmacRaw(secretKey, checkStr);
+  const computed = Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (computed.toLowerCase() !== hash.toLowerCase()) return null;
+  try {
+    const user = JSON.parse(params.get('user') || '{}');
+    return user && user.id ? user : null;
+  } catch {
+    return null;
+  }
 }
 
 async function getWebhookSecret(env) {
@@ -727,6 +879,31 @@ async function sendCookieMenu(botToken, chatId) {
   });
 }
 
+async function handleCookieInvoice(request, env) {
+  if (!env.TELEGRAM_BOT_TOKEN) return jsonResp({ ok: false, error: 'BOT_TOKEN missing' }, 500);
+  const body = await request.json().catch(() => ({}));
+  const pkgId = String(body.pkgId || '');
+  const pkg = COOKIE_PACKS[pkgId];
+  if (!pkg) return jsonResp({ ok: false, error: 'Пакет не найден' }, 400);
+
+  const tgUser = await verifyTelegramInitData(body.initData || '', env.TELEGRAM_BOT_TOKEN);
+  const uid = tgUser ? String(tgUser.id) : 'webapp';
+
+  const tgRes = await tgCall(env.TELEGRAM_BOT_TOKEN, 'createInvoiceLink', {
+    title: pkg.title,
+    description: pkg.desc,
+    payload: JSON.stringify({ uid, pkg: pkgId, src: 'webapp' }),
+    provider_token: '',
+    currency: 'XTR',
+    prices: [{ label: pkg.title, amount: pkg.stars }]
+  });
+
+  if (!tgRes.ok || !tgRes.result) {
+    return jsonResp({ ok: false, error: tgRes.description || 'Ошибка создания счёта Stars' }, 502);
+  }
+  return jsonResp({ ok: true, invoiceLink: tgRes.result });
+}
+
 async function runScheduled(env) {
   const state = await loadState(env.NEWS_KV);
   await runPipeline(env, { toAdminDraft: state.cronMode === 'draft' });
@@ -872,9 +1049,11 @@ async function handleWebhook(request, env, ctx) {
   if (upd.pre_checkout_query) {
     const q = upd.pre_checkout_query;
     let valid = false;
+    let pkg = null;
+    let parsed = null;
     try {
-      const p = JSON.parse(q.invoice_payload);
-      const pkg = COOKIE_PACKS[p.pkg];
+      parsed = JSON.parse(q.invoice_payload);
+      pkg = COOKIE_PACKS[parsed.pkg];
       valid = Boolean(pkg && q.currency === 'XTR' && q.total_amount === pkg.stars);
     } catch {}
     await tgCall(env.TELEGRAM_BOT_TOKEN, 'answerPreCheckoutQuery', {
@@ -882,6 +1061,18 @@ async function handleWebhook(request, env, ctx) {
       ok: valid,
       ...(valid ? {} : { error_message: 'Некорректное угощение или сумма Stars.' })
     });
+    if (valid && pkg && parsed && parsed.src === 'webapp') {
+      const fromUser = q.from?.username ? `@${q.from.username}` : (q.from?.first_name || String(q.from?.id || 'guest'));
+      ctx.waitUntil((async () => {
+        const state = await loadState(env.NEWS_KV);
+        state.cookiesTotal += pkg.stars;
+        state.cookiesCount += 1;
+        await saveState(env.NEWS_KV, state);
+        if (env.ADMIN_CHAT_ID) {
+          await notifyAdmin(env, `🍩 Донат из мини-приложения! ${fromUser} угостил диджеев на ${pkg.stars} ⭐ («${pkg.title}»). Касса: ${state.cookiesTotal} ⭐.`);
+        }
+      })());
+    }
     return jsonResp({ ok: true });
   }
 
