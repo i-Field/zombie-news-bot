@@ -1,5 +1,5 @@
 /**
- * ZOMBIE NEWS RADIO & AI CREW — Cloudflare Worker (V8)
+ * ZOMBIE NEWS RADIO & AI CREW — Cloudflare Worker (V8.1)
  * Single-file Worker for GitHub -> Cloudflare Workers
  * Bindings: NEWS_KV (KV), AI (Workers AI)
  * Env Vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY, ADMIN_CHAT_ID
@@ -75,6 +75,10 @@ function jsonResp(data, status = 200) {
 
 function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function cleanNewsFormatting(str) {
+  return String(str || '').replace(/\*\*/g, '').replace(/^#+\s*/gm, '').trim();
 }
 
 function hasCyrillicTrigger(text, innerPattern) {
@@ -265,29 +269,34 @@ async function callChatAIWithBackup(env, { systemInstruction, history, userPromp
   return { ok: false, errors: [...(gem.errors || []), wa.error] };
 }
 
-function buildCtaMarkup(env, textHint = '', includeMiniApp = true) {
+// Telegram forbids `web_app` inline buttons in Groups and Channels (BUTTON_TYPE_INVALID).
+// Use `web_app` ONLY when isPrivate === true; use t.me direct links everywhere else.
+function buildCtaMarkup(env, textHint = '', isPrivate = false, isChannel = false) {
   const eco = getEcosystem(env);
   const lower = String(textHint || '').toLowerCase();
   const matched = eco.filter((i) => !i.isWebApp && i.keywords.some((kw) => lower.includes(kw)));
   const picks = matched.length ? matched.slice(0, 2) : [eco[1], eco[0]];
   const rows = [picks.map((p) => ({ text: `🎮 ${p.name}`, url: p.url }))];
-  if (includeMiniApp) {
-    rows.push([
-      { text: '📻 Открыть Zombie Radio', web_app: { url: eco.find((e) => e.isWebApp).url } },
-      { text: '🤩 Банкет / Звёзды', callback_data: 'open_banquet' },
-    ]);
-  }
+
+  const radioBtn = isPrivate
+    ? { text: '📻 Открыть Zombie Radio', web_app: { url: eco.find((e) => e.isWebApp).url } }
+    : { text: '📻 Открыть Zombie Radio', url: `https://t.me/${BOT_USERNAME}?startapp=radio` };
+  const banquetBtn = isChannel
+    ? { text: '🤩 Банкет / Звёзды', url: `https://t.me/${BOT_USERNAME}?start=banquet` }
+    : { text: '🤩 Банкет / Звёзды', callback_data: 'open_banquet' };
+
+  rows.push([radioBtn, banquetBtn]);
   return { inline_keyboard: rows };
 }
 
-function buildNewsMarkup(env, textHint = '', showPublishBtn = true) {
-  const base = buildCtaMarkup(env, textHint, true);
+function buildNewsMarkup(env, textHint = '', showPublishBtn = true, isPrivate = false) {
+  const base = buildCtaMarkup(env, textHint, isPrivate, false);
   const controls = [{ text: '⚡ Новая новость', callback_data: 'news_gen' }];
   if (showPublishBtn) controls.push({ text: '📢 В канал', callback_data: 'news_pub' });
   return { inline_keyboard: [controls, ...base.inline_keyboard] };
 }
 
-function buildAllGamesMarkup(env) {
+function buildAllGamesMarkup(env, isPrivate = false) {
   const eco = getEcosystem(env);
   const bots = eco.filter((e) => !e.isWebApp);
   const rows = [];
@@ -296,10 +305,10 @@ function buildAllGamesMarkup(env) {
     if (bots[i + 1]) row.push({ text: bots[i + 1].name, url: bots[i + 1].url });
     rows.push(row);
   }
-  rows.push([
-    { text: '📻 Радио и Пульт', web_app: { url: (env && env.MINIAPP_URL) || DEFAULT_MINIAPP_URL } },
-    { text: '🤩 Банкет диджеям', callback_data: 'open_banquet' },
-  ]);
+  const radioBtn = isPrivate
+    ? { text: '📻 Радио и Пульт', web_app: { url: (env && env.MINIAPP_URL) || DEFAULT_MINIAPP_URL } }
+    : { text: '📻 Радио и Пульт', url: `https://t.me/${BOT_USERNAME}?startapp=radio` };
+  rows.push([radioBtn, { text: '🤩 Банкет диджеям', callback_data: 'open_banquet' }]);
   return { inline_keyboard: rows };
 }
 
@@ -311,8 +320,8 @@ function getPersonaPrompt(isGroup, chatTitle = '') {
   return [
     'Ты — дуэт ведущих ночного пиратского Zombie Rap Radio: бодрый техно-ведущий Zombie-DJ и саркастичный уличный философ Дядя Коля Мертвец.',
     isGroup ? `Вы сидите в Telegram-группе "${chatTitle || 'тусовка'}" вместе с живыми участниками.` : 'Вы общаетесь 1-на-1 со слушателем в личке.',
-    'Правила: отвечай живо по-русски, остроумно, без воды (2–5 коротких фраз). Реагируй именно на реплику собеседника и историю чата.',
-    'Если к месту (скучно, карты, слоты, стратегия, музыка, ИИ), предложи заглянуть в один из ботов тусовки (Дурак Империя, Forest Fortune 5x5, Lucky Rodger Slot, Khutor Empire, iField Studio, iField Chat), но без спама.',
+    'Правила: отвечай живо по-русски, остроумно, без воды (2–5 коротких фраз). Не используй Markdown-звёздочки **.',
+    'Реагируй именно на реплику собеседника и историю чата. Если к месту (скучно, карты, слоты, стратегия, музыка, ИИ), предложи заглянуть в один из ботов тусовки (Дурак Империя, Forest Fortune 5x5, Lucky Rodger Slot, Khutor Empire, iField Studio, iField Chat), но без спама.',
   ].join('\n');
 }
 
@@ -321,13 +330,15 @@ async function generateAndStoreNews(env, { postToChannel = false, forceTopic = '
   const sys = [
     'Ты главный редактор сатирического рэп-радио Zombie News.',
     'Напиши один короткий, острый, смешной выпуск ночных новостей от Zombie-DJ и Дяди Коли Мертвеца: 1 заголовок с эмодзи + 3–4 фразы ироничной сводки и короткий призыв проверить удачу.',
+    'НЕ используй звёздочки ** и решётки # в тексте — пиши чистым текстом с эмодзи.',
     `Можешь упомянуть проект из тусовки: ${eco}.`,
   ].join('\n');
   const prompt = forceTopic ? `Срочный выпуск про: ${forceTopic}` : `Свежий выпуск эфира #${Math.floor(Math.random() * 900 + 100)} на ${new Date().toUTCString()}`;
   const aiRes = await callChatAIWithBackup(env, { systemInstruction: sys, history: [], userPrompt: prompt });
   if (!aiRes.ok) return { ok: false, error: aiRes.errors.join(' | ') };
 
-  const item = { id: `news_${Date.now()}`, text: aiRes.text, provider: aiRes.provider, model: aiRes.model, createdAt: new Date().toISOString() };
+  const cleanText = cleanNewsFormatting(aiRes.text);
+  const item = { id: `news_${Date.now()}`, text: cleanText, provider: aiRes.provider, model: aiRes.model, createdAt: new Date().toISOString() };
   const prev = await kvGetJson(env, 'news_history', []);
   await kvPutJson(env, 'latest_news', item);
   await kvPutJson(env, 'news_history', [item, ...(Array.isArray(prev) ? prev : [])].slice(0, 12));
@@ -337,8 +348,11 @@ async function generateAndStoreNews(env, { postToChannel = false, forceTopic = '
     const channelId = env.TELEGRAM_CHAT_ID || DEFAULT_CHANNEL;
     channelSent = await sendTgMessage(env, channelId, `🎙 <b>ZOMBIE NEWS ЭФИР</b>\n\n${escapeHtml(item.text)}`, {
       parse_mode: 'HTML',
-      reply_markup: buildCtaMarkup(env, item.text, true),
+      reply_markup: buildCtaMarkup(env, item.text, false, true),
     });
+    if (!channelSent?.ok) {
+      return { ok: false, item, error: channelSent?.description || 'Не удалось отправить в канал (проверь, что бот — админ канала с правом публикации)' };
+    }
   }
   return { ok: true, item, channelSent };
 }
@@ -347,9 +361,9 @@ async function publishLatestNewsToChannel(env) {
   const item = await kvGetJson(env, 'latest_news', null);
   if (!item || !item.text) return generateAndStoreNews(env, { postToChannel: true });
   const channelId = env.TELEGRAM_CHAT_ID || DEFAULT_CHANNEL;
-  const sent = await sendTgMessage(env, channelId, `🎙 <b>ZOMBIE NEWS ЭФИР</b>\n\n${escapeHtml(item.text)}`, {
+  const sent = await sendTgMessage(env, channelId, `🎙 <b>ZOMBIE NEWS ЭФИР</b>\n\n${escapeHtml(cleanNewsFormatting(item.text))}`, {
     parse_mode: 'HTML',
-    reply_markup: buildCtaMarkup(env, item.text, true),
+    reply_markup: buildCtaMarkup(env, item.text, false, true),
   });
   return { ok: Boolean(sent?.ok), item, error: sent?.description };
 }
@@ -381,15 +395,23 @@ function shouldBotReplyInGroup(msg, mem) {
 
 async function handleCommands(env, msg, text) {
   const chatId = msg.chat.id;
+  const isPrivate = msg.chat.type === 'private';
   const trimmed = text.trim();
   const parts = trimmed.split(/\s+/);
   const cmd = parts[0].toLowerCase().replace(`@${BOT_USERNAME}`, '');
   const arg = parts.slice(1).join(' ').trim();
 
   if (cmd === '/start') {
+    if (arg === 'banquet') {
+      await sendTgMessage(env, chatId, '🤩 <b>Звёздный банкет и донаты в студию!</b>\nВыбери угощение для Zombie-DJ и Дяди Коли:', {
+        parse_mode: 'HTML',
+        reply_markup: buildBanquetMarkup(),
+      });
+      return true;
+    }
     await sendTgMessage(env, chatId, '📻 <b>Здарова, на связи Zombie Rap Radio!</b>\nЗа пультом <b>Zombie-DJ</b> и <b>Дядя Коля Мертвец</b>.\n\n• Пиши прямо текстом — поболтаем.\n• <b>/post</b> — придумать свежую новость и кинуть в чат или канал.\n• <b>/games</b> — все 7 наших ботов.\n• <b>/banquet</b> — угостить диджеев звёздами.', {
       parse_mode: 'HTML',
-      reply_markup: buildAllGamesMarkup(env),
+      reply_markup: buildAllGamesMarkup(env, isPrivate),
     });
     return true;
   }
@@ -398,7 +420,7 @@ async function handleCommands(env, msg, text) {
     const lines = getEcosystem(env).filter((e) => !e.isWebApp).map((e) => `• <b>${escapeHtml(e.name)}</b> [${e.tag}] — ${escapeHtml(e.short)}`);
     await sendTgMessage(env, chatId, `🎮 <b>Вся тусовка проектов iField & Zombie:</b>\n\n${lines.join('\n')}`, {
       parse_mode: 'HTML',
-      reply_markup: buildAllGamesMarkup(env),
+      reply_markup: buildAllGamesMarkup(env, isPrivate),
     });
     return true;
   }
@@ -416,7 +438,7 @@ async function handleCommands(env, msg, text) {
     const toChannelNow = /^(channel|канал)$/i.test(arg);
     const gen = await generateAndStoreNews(env, { postToChannel: toChannelNow, forceTopic: toChannelNow ? '' : arg });
     if (!gen.ok) {
-      await sendTgMessage(env, chatId, `⚠️ Не вышло сгенерировать выпуск: ${gen.error}`);
+      await sendTgMessage(env, chatId, `⚠️ Не вышло: ${gen.error}`);
       return true;
     }
     const header = toChannelNow
@@ -424,7 +446,7 @@ async function handleCommands(env, msg, text) {
       : '🎙 <b>Свежий выпуск готов!</b> Жми «📢 В канал», если отправляем в эфир:';
     await sendTgMessage(env, chatId, `${header}\n\n${escapeHtml(gen.item.text)}`, {
       parse_mode: 'HTML',
-      reply_markup: buildNewsMarkup(env, gen.item.text, !toChannelNow),
+      reply_markup: buildNewsMarkup(env, gen.item.text, !toChannelNow, isPrivate),
     });
     return true;
   }
@@ -433,15 +455,15 @@ async function handleCommands(env, msg, text) {
     await sendTyping(env, chatId);
     const cached = arg ? null : await kvGetJson(env, 'latest_news', null);
     if (cached && cached.text) {
-      await sendTgMessage(env, chatId, `🎙 <b>Последний выпуск:</b>\n\n${escapeHtml(cached.text)}`, {
+      await sendTgMessage(env, chatId, `🎙 <b>Последний выпуск:</b>\n\n${escapeHtml(cleanNewsFormatting(cached.text))}`, {
         parse_mode: 'HTML',
-        reply_markup: buildNewsMarkup(env, cached.text, true),
+        reply_markup: buildNewsMarkup(env, cached.text, true, isPrivate),
       });
     } else {
       const gen = await generateAndStoreNews(env, { postToChannel: false, forceTopic: arg });
       await sendTgMessage(env, chatId, gen.ok ? `🎙 <b>Срочный выпуск:</b>\n\n${escapeHtml(gen.item.text)}` : `⚠️ Радиовышка перегружена: ${gen.error}`, {
         parse_mode: 'HTML',
-        ...(gen.ok ? { reply_markup: buildNewsMarkup(env, gen.item.text, true) } : {}),
+        ...(gen.ok ? { reply_markup: buildNewsMarkup(env, gen.item.text, true, isPrivate) } : {}),
       });
     }
     return true;
@@ -450,7 +472,7 @@ async function handleCommands(env, msg, text) {
   if (cmd === '/ping') {
     const mem = RAM_CHATS.get(String(chatId));
     if (!/\bai\b/i.test(text)) {
-      await sendTgMessage(env, chatId, `🟢 Worker жив (V8). Чат ${msg.chat.type}. RAM-чатов: ${RAM_CHATS.size}. Истории тут: ${mem ? mem.history.length : 0}. Напиши /ping ai для теста ИИ или /post для свежей новости.`);
+      await sendTgMessage(env, chatId, `🟢 Worker жив (V8.1). Чат ${msg.chat.type}. RAM-чатов: ${RAM_CHATS.size}. Истории тут: ${mem ? mem.history.length : 0}. Напиши /ping ai для теста ИИ или /post для свежей новости.`);
       return true;
     }
     await sendTyping(env, chatId);
@@ -486,11 +508,12 @@ async function handlePrivateMessage(env, msg) {
     return;
   }
 
-  pushChatHistory(mem, 'assistant', 'Zombie-DJ', aiRes.text);
+  const cleanReply = cleanNewsFormatting(aiRes.text);
+  pushChatHistory(mem, 'assistant', 'Zombie-DJ', cleanReply);
   mem.lastBotReplyTs = Date.now();
   mem.turnsSinceReply = 0;
   await flushChatMem(env, chatId, mem);
-  await sendTgMessage(env, chatId, aiRes.text, { reply_markup: buildCtaMarkup(env, `${text} ${aiRes.text}`, true) });
+  await sendTgMessage(env, chatId, cleanReply, { reply_markup: buildCtaMarkup(env, `${text} ${cleanReply}`, true, false) });
 }
 
 async function handleGroupMessage(env, msg) {
@@ -502,7 +525,7 @@ async function handleGroupMessage(env, msg) {
     if (newcomers.length > 0) {
       await sendTgMessage(env, chatId, `🧟‍♂️ В эфир залетел(и): <b>${escapeHtml(newcomers.join(', '))}</b>!\nДядя Коля тасует карты, Zombie-DJ крутит биты. Срубнём в Дурака, покрутим слоты или включим радио?`, {
         parse_mode: 'HTML',
-        reply_markup: buildAllGamesMarkup(env),
+        reply_markup: buildAllGamesMarkup(env, false),
       });
     }
     return;
@@ -529,11 +552,12 @@ async function handleGroupMessage(env, msg) {
     return;
   }
 
-  pushChatHistory(mem, 'assistant', 'Zombie-DJ', aiRes.text);
+  const cleanReply = cleanNewsFormatting(aiRes.text);
+  pushChatHistory(mem, 'assistant', 'Zombie-DJ', cleanReply);
   mem.lastBotReplyTs = Date.now();
   mem.turnsSinceReply = 0;
   await flushChatMem(env, chatId, mem);
-  await sendTgMessage(env, chatId, aiRes.text, { reply_to_message_id: msg.message_id, reply_markup: buildCtaMarkup(env, `${text} ${aiRes.text}`, false) });
+  await sendTgMessage(env, chatId, cleanReply, { reply_to_message_id: msg.message_id, reply_markup: buildCtaMarkup(env, `${text} ${cleanReply}`, false, false) });
 }
 
 async function sendStarInvoiceToChat(env, chatId, tierId) {
@@ -549,6 +573,7 @@ async function createStarInvoiceLink(env, tierId) {
 async function handleCallbackQuery(env, cq) {
   const data = cq.data || '';
   const chatId = cq.message?.chat?.id;
+  const isPrivate = cq.message?.chat?.type === 'private';
   await tgCall(env, 'answerCallbackQuery', { callback_query_id: cq.id }).catch(() => null);
   if (!chatId) return;
 
@@ -561,7 +586,7 @@ async function handleCallbackQuery(env, cq) {
     const gen = await generateAndStoreNews(env, { postToChannel: false });
     await sendTgMessage(env, chatId, gen.ok ? `🎙 <b>Свежий выпуск готов!</b>\n\n${escapeHtml(gen.item.text)}` : `⚠️ Ошибка генерации: ${gen.error}`, {
       parse_mode: 'HTML',
-      ...(gen.ok ? { reply_markup: buildNewsMarkup(env, gen.item.text, true) } : {}),
+      ...(gen.ok ? { reply_markup: buildNewsMarkup(env, gen.item.text, true, isPrivate) } : {}),
     });
     return;
   }
@@ -942,7 +967,7 @@ async function handleDebug(env) {
   const lastKvErr = await kvGetJson(env, 'diag_last_error', null);
   return jsonResp({
     ok: true,
-    version: 'V8',
+    version: 'V8.1',
     privacyWarning: canRead === false ? 'Отключи Group Privacy в @BotFather -> /mybots -> @zombie_rap_news_bot -> Bot Settings -> Group Privacy -> Turn off' : null,
     bot: me?.result || me,
     webhookInfo: webhookInfo?.result || webhookInfo,
@@ -970,7 +995,7 @@ async function handleSetup(env, reqUrl) {
   });
   const me = await tgCall(env, 'getMe');
   const canRead = me?.result?.can_read_all_group_messages ?? null;
-  return jsonResp({ ok: Boolean(wh?.ok), version: 'V8', webhookUrl, webhookSet: wh, commandsSet: cmds, canReadAllGroupMessages: canRead, warning: canRead === false ? 'Отключи Group Privacy в @BotFather!' : null });
+  return jsonResp({ ok: Boolean(wh?.ok), version: 'V8.1', webhookUrl, webhookSet: wh, commandsSet: cmds, canReadAllGroupMessages: canRead, warning: canRead === false ? 'Отключи Group Privacy в @BotFather!' : null });
 }
 
 export default {
