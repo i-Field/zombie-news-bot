@@ -1,3278 +1,2174 @@
-const DEFAULT_CHANNEL = '@zombie_news_flava';
-const DEFAULT_BOT = 'zombie_rap_news_bot';
-const DEFAULT_SLOTS_URL = 'https://forest-fortune-5x5.qx420.workers.dev/';
-const DEFAULT_SLOTS_BOT = 'ForestFortuneVegasBot';
-const DEFAULT_ROGER_URL = 'https://i-field.github.io/lucky-roger-slot/';
-const DEFAULT_DURAK_URL = 'https://i-field.github.io/durak-mini-app/';
-const DEFAULT_MUSIC_URL = 'https://i-field.github.io/ifield-music-lab/';
-
-const GEMINI_MODELS = [
-  'gemini-4-hydrogen',
-  'gemini-3.1-flash-lite',
-];
-
+const GEMINI_TEXT_MODELS = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
 const GEMINI_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 
-const WORKERS_AI_IMAGE_MODELS = [
-  '@cf/black-forest-labs/flux-1-schnell',
-  '@cf/bytedance/stable-diffusion-xl-lightning',
-];
+const RSS_SOURCES = {
+  world: [
+    'https://lenta.ru/rss/news',
+    'https://meduza.io/rss/all',
+    'https://www.bbc.com/russian/index.xml',
+  ],
+  crypto: [
+    'https://bits.media/rss2/',
+    'https://forklog.com/feed/',
+  ],
+  tech: [
+    'https://habr.com/ru/rss/news/?fl=ru',
+    'https://3dnews.ru/news/rss/',
+  ],
+  showbiz: [
+    'https://www.intermedia.ru/rss/news.xml',
+    'https://lenta.ru/rss/news/culture',
+  ],
+  weird: [
+    'https://www.reddit.com/r/nottheonion/hot.json?limit=10',
+    'https://lenta.ru/rss/news/life',
+  ],
+};
 
 const COOKIE_PACKS = {
   cookie_50: {
     id: 'cookie_50',
     stars: 50,
-    title: 'Хрустящая печенька 🍪',
-    desc: 'Кофе и печенье для Zombie-DJ и Дяди Коли на ночной эфир',
-    label: 'Печенье для диджеев (50 ⭐)',
+    cookies: 5,
+    isBanquet: false,
+    title: 'Коробка печенья для студии',
+    desc: '5 хрустящих печенек для Zombie-DJ и Дяди Коли Мертвеца.',
   },
   cookie_150: {
     id: 'cookie_150',
     stars: 150,
-    title: 'Коробка печенья 🍩',
-    desc: 'Плотный паёк для студии: больше жёстких панчей и свежих обложек',
-    label: 'Коробка печенья (150 ⭐)',
+    cookies: 18,
+    isBanquet: false,
+    title: 'Ящик печенья и кофе в эфир',
+    desc: '18 печенек и бодрый эспрессо на ночную смену диджеев.',
   },
   cookie_500: {
     id: 'cookie_500',
     stars: 500,
-    title: 'VIP-самовар и пряники 👑',
-    desc: 'Королевский респект продюсеру студии Zombie News Flava',
-    label: 'VIP-самовар студии (500 ⭐)',
+    cookies: 75,
+    isBanquet: false,
+    title: 'Продюсерский кейс печенья',
+    desc: '75 печенек и статус главного спонсора ночного эфира.',
   },
   banquet_10000: {
     id: 'banquet_10000',
     stars: 10000,
-    title: '🥂 Банкет для диджеев!',
-    desc: 'Легендарный ужин на весь некро-район: Zombie-DJ и Дядя Коля качают до утра',
-    label: 'Банкет для диджеев (10 000 ⭐)',
+    cookies: 2000,
+    isBanquet: true,
+    title: 'Банкет для диджеев',
+    desc: 'Легендарный банкет на всю студию Zombie News Flava.',
   },
 };
 
-const STYLES = ['rap', 'chanson', 'battle'];
-const CATEGORIES = ['weird', 'crypto', 'showbiz', 'tech'];
+// Isolate RAM caches to keep Cloudflare KV writes minimal on Free Tier
+const RAM_CHATS = new Map();
+const RAM_STATS = { data: null, ts: 0 };
+const RAM_RATE = new Map();
 
-const CATEGORY_LABELS = {
-  weird: 'Мировой трэш',
-  crypto: 'Крипта & Web3',
-  showbiz: 'Шоу-биз & Хайп',
-  tech: 'Техно & ИИ',
-};
-
-const STYLE_LABELS = {
-  rap: '🎤 Zombie-DJ',
-  chanson: '🎸 Дядя Коля Мертвец',
-  battle: '⚔️ Рэп vs Шансон',
-};
-
-const USER_AGENT = 'Mozilla/5.0 (compatible; ZombieNewsStudio/2.2; +https://t.me/zombie_news_flava)';
-const GROUP_MEM = new Map();
+const MAX_RAM_CHATS = 120;
+const KV_FLUSH_INTERVAL_MS = 180000; // max 1 KV write per 3 min per active chat
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, '') || '/';
-
-    if (request.method === 'OPTIONS' && path.startsWith('/api/')) {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-
-    if (path === '/favicon.ico') {
-      return new Response(null, { status: 204 });
-    }
+    const path = url.pathname;
 
     try {
-      if (request.method === 'GET' && (path === '/' || path === '/app' || path === '/index.html')) {
-        return new Response(renderHtml({
-          bot: getBotUsername(env),
-          channel: getChannelUsername(env),
-          apiBase: url.origin,
-          slotsUrl: getSlotsUrl(env),
-          slotsBot: getSlotsBot(env),
-          rogerUrl: getRogerUrl(env),
-          durakUrl: getDurakUrl(env),
-          musicUrl: getMusicUrl(env),
-        }), {
+      if (request.method === 'GET' && path === '/') {
+        const stats = await loadStats(env);
+        return new Response(renderHtml(env, stats), {
           headers: {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'public, max-age=120',
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
           },
         });
       }
 
-      if (request.method === 'GET' && path === '/api/studio') {
-        const studio = await getStudioState(env);
-        return jsonResponse({
-          ok: true,
-          bot: getBotUsername(env),
-          channel: getChannelUsername(env),
-          slotsUrl: getSlotsUrl(env),
-          slotsBot: getSlotsBot(env),
-          rogerUrl: getRogerUrl(env),
-          durakUrl: getDurakUrl(env),
-          musicUrl: getMusicUrl(env),
-          hasWorkersAI: Boolean(env.AI),
-          ...studio,
-        }, 200, {
-          ...corsHeaders(),
-          'cache-control': 'public, max-age=15',
-        });
+      if (request.method === 'GET' && path === '/setup') {
+        return handleSetup(request, env);
       }
 
-      if (request.method === 'POST' && path === '/api/react') {
-        const body = await safeJson(request);
-        const ip = request.headers.get('cf-connecting-ip') || 'anon';
-        const allowed = await checkRateLimit(env, `rl:react:${ip}`, 3, 25);
-        if (!allowed) {
-          return jsonResponse({ ok: false, error: 'Слишком часто, переведи дух пару секунд' }, 429, corsHeaders());
+      if (request.method === 'GET' && path === '/run') {
+        const secret = url.searchParams.get('secret') || '';
+        if (env.RUN_SECRET && secret !== env.RUN_SECRET) {
+          return jsonResp({ ok: false, error: 'Forbidden' }, 403);
         }
+        const force = url.searchParams.get('force') === '1';
+        const res = await runNewsEdition(env, { force, targetChat: env.TELEGRAM_CHAT_ID });
+        return jsonResp(res, res.ok ? 200 : 500);
+      }
 
-        const studio = await getStudioState(env);
-        if (body?.kind === 'vote' && STYLES.includes(body.style)) {
-          studio.votes[body.style] = (studio.votes[body.style] || 0) + 1;
-        } else if (body?.kind === 'post' && body.postId && ['fire', 'skull', 'rock'].includes(body.reaction)) {
-          const post = studio.recentPosts.find((p) => p.id === body.postId);
-          if (post) {
-            post.reactions = post.reactions || { fire: 0, skull: 0, rock: 0 };
-            post.reactions[body.reaction] = (post.reactions[body.reaction] || 0) + 1;
-          }
-        } else {
-          return jsonResponse({ ok: false, error: 'Неверные параметры реакции' }, 400, corsHeaders());
-        }
-
-        await saveStudioState(env, studio);
-        return jsonResponse({ ok: true, votes: studio.votes, recentPosts: studio.recentPosts }, 200, corsHeaders());
+      if (request.method === 'GET' && path === '/api/state') {
+        const stats = await loadStats(env);
+        return jsonResp({ ok: true, stats, projects: getEcosystem(env) });
       }
 
       if (request.method === 'POST' && path === '/api/free-cookie') {
-        const body = await safeJson(request);
-        const ip = request.headers.get('cf-connecting-ip') || 'anon';
-        const allowed = await checkRateLimit(env, `rl:fc:${ip}`, 10, 1);
-        if (!allowed) {
-          const current = await getStudioState(env);
-          return jsonResponse({ ok: true, throttled: true, freeCookies: current.freeCookies }, 200, corsHeaders());
+        const ip = request.headers.get('CF-Connecting-IP') || 'anon';
+        if (!allowRate('fc:' + ip, 1500)) {
+          return jsonResp({ ok: true, throttled: true });
         }
-        const delta = Math.max(1, Math.min(10, Number(body?.count) || 1));
-        const studio = await getStudioState(env);
-        studio.freeCookies = (studio.freeCookies || 0) + delta;
-        await saveStudioState(env, studio);
-        return jsonResponse({ ok: true, freeCookies: studio.freeCookies }, 200, corsHeaders());
+        const body = await safeJson(request);
+        const delta = Math.max(1, Math.min(25, Number(body && body.count) || 1));
+        const stats = await updateStats(env, (s) => {
+          s.freeCookies = (s.freeCookies || 0) + delta;
+        });
+        return jsonResp({ ok: true, stats });
+      }
+
+      if (request.method === 'POST' && path === '/api/react') {
+        const ip = request.headers.get('CF-Connecting-IP') || 'anon';
+        if (!allowRate('react:' + ip, 1200)) {
+          return jsonResp({ ok: false, error: 'Too fast' }, 429);
+        }
+        const body = await safeJson(request);
+        const kind = body && body.kind;
+        if (!['fire', 'zombie', 'guitar'].includes(kind)) {
+          return jsonResp({ ok: false, error: 'Invalid reaction' }, 400);
+        }
+        const stats = await updateStats(env, (s) => {
+          if (!s.reacts) s.reacts = { fire: 0, zombie: 0, guitar: 0 };
+          s.reacts[kind] = (s.reacts[kind] || 0) + 1;
+        });
+        return jsonResp({ ok: true, stats });
       }
 
       if (request.method === 'POST' && path === '/api/suggest') {
         const body = await safeJson(request);
-        const text = String(body?.text || '').replace(/\s+/g, ' ').trim();
-        const style = STYLES.includes(body?.style) ? body.style : 'auto';
-        const author = String(body?.author || 'Слушатель').replace(/[^\p{L}\p{N}_ .-]/gu, '').trim().slice(0, 32) || 'Слушатель';
-
-        if (text.length < 6 || text.length > 180) {
-          return jsonResponse({ ok: false, error: 'Напиши тему от 6 до 180 символов' }, 400, corsHeaders());
+        const topic = String((body && body.topic) || '').trim().slice(0, 180);
+        const author = String((body && body.author) || 'Слушатель').trim().slice(0, 48);
+        if (topic.length < 4) {
+          return jsonResp({ ok: false, error: 'Тема слишком короткая' }, 400);
         }
-
-        const ip = request.headers.get('cf-connecting-ip') || 'anon';
-        const allowed = await checkRateLimit(env, `rl:sug:${ip}`, 900, 1);
-        if (!allowed) {
-          return jsonResponse({ ok: false, error: 'Одну тему можно закидывать раз в 15 минут (бережем лимит)' }, 429, corsHeaders());
+        const ip = request.headers.get('CF-Connecting-IP') || 'anon';
+        if (!allowRate('sug:' + ip, 900000)) {
+          return jsonResp({ ok: false, error: 'Подожди 15 минут перед следующей темой' }, 429);
         }
-
-        const inbox = await getInbox(env);
-        const item = {
-          id: crypto.randomUUID().slice(0, 8),
-          text,
-          style,
-          author,
-          ts: Date.now(),
-        };
-        inbox.unshift(item);
-        await saveInbox(env, inbox.slice(0, 25));
-
-        if (env.ADMIN_CHAT_ID) {
+        if (env.NEWS_KV) {
+          const list = (await env.NEWS_KV.get('suggestions', 'json')) || [];
+          list.unshift({ topic, author, ts: Date.now() });
+          await env.NEWS_KV.put('suggestions', JSON.stringify(list.slice(0, 30)));
+        }
+        if (env.ADMIN_CHAT_ID && env.TELEGRAM_BOT_TOKEN) {
           ctx.waitUntil(
             tgCall(env, 'sendMessage', {
               chat_id: env.ADMIN_CHAT_ID,
-              text: `💡 <b>Новая предложка из Mini App</b>\nОт: ${escapeHtml(author)}\nСтиль: ${escapeHtml(STYLE_LABELS[style] || 'Авто')}\n\n«${escapeHtml(text)}»`,
-              parse_mode: 'HTML',
-            }).catch(() => {})
+              text: '💡 Новая тема от ' + author + ':\n' + topic,
+            })
           );
         }
-
-        return jsonResponse({ ok: true, item, queueSize: Math.min(inbox.length, 25) }, 200, corsHeaders());
+        return jsonResp({ ok: true });
       }
 
       if (request.method === 'POST' && path === '/api/cookie-invoice') {
-        if (!env.TELEGRAM_BOT_TOKEN) {
-          return jsonResponse({ ok: false, error: 'Не задан TELEGRAM_BOT_TOKEN' }, 500, corsHeaders());
-        }
         const body = await safeJson(request);
-        const pack = COOKIE_PACKS[body?.pack] || COOKIE_PACKS.cookie_50;
-        const nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        const packId = String((body && body.packId) || 'cookie_50');
+        const pack = COOKIE_PACKS[packId];
+        if (!pack) return jsonResp({ ok: false, error: 'Unknown pack' }, 400);
 
+        const nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
         if (env.NEWS_KV) {
           await env.NEWS_KV.put(
-            `nonce:${nonce}`,
-            JSON.stringify({ pack: pack.id, stars: pack.stars, paid: false, ts: Date.now() }),
-            { expirationTtl: 900 }
+            'inv:' + nonce,
+            JSON.stringify({ packId: pack.id, stars: pack.stars, used: false }),
+            { expirationTtl: 3600 }
           );
         }
 
-        const res = await tgCall(env, 'createInvoiceLink', {
+        const linkRes = await tgCall(env, 'createInvoiceLink', {
           title: pack.title,
           description: pack.desc,
-          payload: JSON.stringify({ pack: pack.id, src: 'webapp', nonce }),
-          provider_token: '',
+          payload: JSON.stringify({ packId: pack.id, nonce }),
           currency: 'XTR',
-          prices: [{ label: pack.label, amount: pack.stars }],
+          prices: [{ label: pack.title, amount: pack.stars }],
         });
 
-        if (!res?.ok || !res?.result) {
-          return jsonResponse({ ok: false, error: res?.description || 'Не удалось создать счёт Stars' }, 502, corsHeaders());
+        if (!linkRes.ok || !linkRes.result) {
+          return jsonResp({ ok: false, error: linkRes.description || 'Invoice error' }, 500);
         }
-
-        return jsonResponse({
-          ok: true,
-          invoiceLink: res.result,
-          pack: pack.id,
-          stars: pack.stars,
-          nonce,
-        }, 200, corsHeaders());
+        return jsonResp({ ok: true, invoiceUrl: linkRes.result, nonce });
       }
 
       if (request.method === 'POST' && path === '/api/cookie-confirm') {
         const body = await safeJson(request);
-        const nonce = String(body?.nonce || '').trim();
+        const nonce = String((body && body.nonce) || '');
         if (!nonce || !env.NEWS_KV) {
-          return jsonResponse({ ok: false, error: 'Неверный код подтверждения' }, 400, corsHeaders());
+          return jsonResp({ ok: false, error: 'Invalid nonce' }, 400);
         }
-        const raw = await env.NEWS_KV.get(`nonce:${nonce}`);
-        if (!raw) {
-          return jsonResponse({ ok: false, error: 'Чек уже учтён или истёк' }, 404, corsHeaders());
+        const inv = await env.NEWS_KV.get('inv:' + nonce, 'json');
+        if (!inv) return jsonResp({ ok: false, error: 'Invoice not found' }, 404);
+        if (inv.used) {
+          const stats = await loadStats(env);
+          return jsonResp({ ok: true, alreadyCounted: true, stats });
         }
-        const info = JSON.parse(raw);
-        if (info.paid) {
-          const s = await getStudioState(env);
-          return jsonResponse({ ok: true, alreadyCounted: true, cookiesTotal: s.cookiesTotal, cookiesCount: s.cookiesCount }, 200, corsHeaders());
-        }
-        info.paid = true;
-        await env.NEWS_KV.put(`nonce:${nonce}`, JSON.stringify(info), { expirationTtl: 600 });
-        const studio = await addStarsCookie(env, info.stars);
-        if (env.ADMIN_CHAT_ID) {
-          ctx.waitUntil(
-            tgCall(env, 'sendMessage', {
-              chat_id: env.ADMIN_CHAT_ID,
-              text: info.stars >= 10000
-                ? `🥂👑 <b>МЕГА-БАНКЕТ В MINI APP!</b>\nКто-то занёс <b>${info.stars} ⭐</b> диджеям!\nВсего собрано: ${studio.cookiesTotal} ⭐`
-                : `🍩 <b>Донат через Mini App!</b>\n+${info.stars} ⭐ на печенье диджеям.\nВсего собрано: ${studio.cookiesTotal} ⭐`,
-              parse_mode: 'HTML',
-            }).catch(() => {})
-          );
-        }
-        return jsonResponse({
-          ok: true,
-          cookiesTotal: studio.cookiesTotal,
-          cookiesCount: studio.cookiesCount,
-        }, 200, corsHeaders());
-      }
-
-      if (path === '/setup') {
-        const runKey = await getRunKey(env);
-        const whSecret = await getWebhookSecret(env);
-        const webhookUrl = `${url.origin}/webhook`;
-        const whPayload = {
-          url: webhookUrl,
-          allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
-          secret_token: whSecret,
-        };
-        const wh = await tgCall(env, 'setWebhook', whPayload);
-        const cmds = await tgCall(env, 'setMyCommands', {
-          commands: [
-            { command: 'start', description: 'Пульт, игры и фишки студии' },
-            { command: 'projects', description: 'Наши игры: Дурак, Слоты, Пульт' },
-            { command: 'news', description: 'Свежий AI-выпуск в чат' },
-            { command: 'roast', description: 'Трек от Zombie-DJ про наш чат' },
-            { command: 'cookie', description: 'Печенье и банкет диджеям (Stars)' },
-            { command: 'draft', description: 'Создать черновик выпуска (админ)' },
-            { command: 'status', description: 'Статус бота и лимитов' },
-          ],
+        const pack = COOKIE_PACKS[inv.packId] || COOKIE_PACKS.cookie_50;
+        inv.used = true;
+        await env.NEWS_KV.put('inv:' + nonce, JSON.stringify(inv), { expirationTtl: 3600 });
+        const stats = await updateStats(env, (s) => {
+          s.paidCookies = (s.paidCookies || 0) + pack.cookies;
+          s.starsTotal = (s.starsTotal || 0) + pack.stars;
+          if (pack.isBanquet) s.banquets = (s.banquets || 0) + 1;
         });
-
-        return jsonResponse({
-          ok: Boolean(wh?.ok),
-          hasWorkersAI: Boolean(env.AI),
-          hasKV: Boolean(env.NEWS_KV),
-          hasGemini: Boolean(env.GEMINI_API_KEY),
-          hasAdmin: Boolean(env.ADMIN_CHAT_ID),
-          miniAppUrl: `${url.origin}/`,
-          runUrl: `${url.origin}/run?key=${runKey}`,
-          draftUrl: `${url.origin}/run?key=${runKey}&preview=1`,
-          wh,
-          cmds,
-        });
+        return jsonResp({ ok: true, stats });
       }
 
-      if (path === '/status' || path === '/health') {
-        const studio = await getStudioState(env);
-        const inbox = await getInbox(env);
-        return jsonResponse({
-          ok: true,
-          hasWorkersAI: Boolean(env.AI),
-          hasKV: Boolean(env.NEWS_KV),
-          hasGemini: Boolean(env.GEMINI_API_KEY),
-          hasAdmin: Boolean(env.ADMIN_CHAT_ID),
-          mode: studio.mode,
-          totalPosts: studio.totalPosts,
-          cookiesTotal: studio.cookiesTotal,
-          freeCookies: studio.freeCookies,
-          inboxCount: inbox.length,
-        });
-      }
-
-      if (path === '/run' || path === '/draft') {
-        const expectedKey = await getRunKey(env);
-        const key = url.searchParams.get('key') || '';
-        if (!key || key !== expectedKey) {
-          return jsonResponse({ ok: false, error: 'Неверный ключ запуска (?key=...)' }, 403);
-        }
-        const preview = path === '/draft' || url.searchParams.get('preview') === '1';
-        const style = url.searchParams.get('style') || 'auto';
-        const category = url.searchParams.get('category') || 'auto';
-
-        ctx.waitUntil(runNewsCycle(env, { preview, style, category, source: 'manual' }));
-        return jsonResponse({ ok: true, started: true, preview, style, category });
-      }
-
-      if (request.method === 'POST' && (path === '/webhook' || path === '/tg-webhook')) {
+      if (request.method === 'POST' && path === '/webhook') {
         const expectedSecret = await getWebhookSecret(env);
-        const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-        if (expectedSecret && got && got !== expectedSecret) {
-          return new Response('Forbidden', { status: 403 });
+        const gotSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
+        if (expectedSecret && gotSecret && gotSecret !== expectedSecret) {
+          return new Response('Unauthorized', { status: 401 });
         }
         const update = await safeJson(request);
-        if (!update) return new Response('OK');
-        await handleTelegramUpdate(update, env, ctx, url.origin);
-        return new Response('OK');
+        if (update) {
+          ctx.waitUntil(handleTelegramUpdate(env, update, url.origin));
+        }
+        return new Response('OK', { status: 200 });
       }
 
       return new Response('Not Found', { status: 404 });
     } catch (err) {
-      return jsonResponse({ ok: false, error: err?.message || String(err) }, 500, corsHeaders());
+      console.error('Worker error:', err);
+      return jsonResp({ ok: false, error: String(err && err.message ? err.message : err) }, 500);
     }
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runNewsCycle(env, { preview: false, style: 'auto', category: 'auto', source: 'cron' }));
+    ctx.waitUntil(runNewsEdition(env, { force: false, targetChat: env.TELEGRAM_CHAT_ID }));
   },
 };
 
-/* ---------------- Telegram Webhook & Commands ---------------- */
+// ---------------- SETUP & SECRETS ----------------
 
-async function handleTelegramUpdate(update, env, ctx, origin) {
-  if (update.pre_checkout_query) {
-    const q = update.pre_checkout_query;
-    let valid = false;
-    try {
-      const p = JSON.parse(q.invoice_payload || '{}');
-      const pack = COOKIE_PACKS[p.pack];
-      if (pack && q.currency === 'XTR' && Number(q.total_amount) === pack.stars) {
-        valid = true;
-      }
-    } catch {}
-    await tgCall(env, 'answerPreCheckoutQuery', {
-      pre_checkout_query_id: q.id,
-      ok: valid,
-      error_message: valid ? undefined : 'Некорректные параметры счёта',
+async function getWebhookSecret(env) {
+  if (env.TELEGRAM_WEBHOOK_SECRET) return env.TELEGRAM_WEBHOOK_SECRET;
+  if (!env.TELEGRAM_BOT_TOKEN) return '';
+  const data = new TextEncoder().encode('znb:' + env.TELEGRAM_BOT_TOKEN);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash))
+    .slice(0, 16)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function handleSetup(request, env) {
+  const origin = new URL(request.url).origin;
+  const webhookUrl = origin + '/webhook';
+  const secretToken = await getWebhookSecret(env);
+
+  const wh = await tgCall(env, 'setWebhook', {
+    url: webhookUrl,
+    secret_token: secretToken || undefined,
+    allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
+    drop_pending_updates: false,
+  });
+
+  const me = await tgCall(env, 'getMe', {});
+
+  const privateCommands = [
+    { command: 'start', description: 'Открыть студию и игры' },
+    { command: 'games', description: 'Игры и проекты i-Field' },
+    { command: 'roast', description: 'Прожарка от Zombie-DJ' },
+    { command: 'cookie', description: 'Угостить диджеев печеньем' },
+    { command: 'ping', description: 'Проверка связи и AI' },
+  ];
+
+  const groupCommands = [
+    { command: 'roast', description: 'Прожарить участников чата' },
+    { command: 'news', description: 'Свежая новость для чата' },
+    { command: 'games', description: 'Во что сыграем?' },
+    { command: 'cookie', description: 'Угостить диджеев' },
+    { command: 'ping', description: 'Проверить слух и AI бота' },
+  ];
+
+  const cmdDefault = await tgCall(env, 'setMyCommands', { commands: privateCommands });
+  const cmdGroup = await tgCall(env, 'setMyCommands', {
+    commands: groupCommands,
+    scope: { type: 'all_group_chats' },
+  });
+
+  if (env.TELEGRAM_BOT_TOKEN) {
+    await tgCall(env, 'setChatMenuButton', {
+      menu_button: {
+        type: 'web_app',
+        text: 'Студия',
+        web_app: { url: origin + '/' },
+      },
     });
-    return;
   }
 
-  const msg = update.message;
-  if (msg?.successful_payment) {
-    const sp = msg.successful_payment;
-    const chargeId = sp.telegram_payment_charge_id || '';
-    if (env.NEWS_KV && chargeId) {
-      const seen = await env.NEWS_KV.get(`pay:${chargeId}`);
-      if (seen) return;
-      await env.NEWS_KV.put(`pay:${chargeId}`, '1', { expirationTtl: 86400 * 30 });
-    }
+  return jsonResp({
+    ok: wh.ok,
+    bot: me.result ? '@' + me.result.username : null,
+    webhookUrl,
+    hasKV: Boolean(env.NEWS_KV),
+    hasAI: Boolean(env.AI),
+    hasGemini: Boolean(env.GEMINI_API_KEY),
+    webhook: wh,
+    commandsDefault: cmdDefault.ok,
+    commandsGroup: cmdGroup.ok,
+  });
+}
 
-    let alreadyViaNonce = false;
-    try {
-      const p = JSON.parse(sp.invoice_payload || '{}');
-      if (p.nonce && env.NEWS_KV) {
-        const raw = await env.NEWS_KV.get(`nonce:${p.nonce}`);
-        if (raw) {
-          const info = JSON.parse(raw);
-          if (info.paid) alreadyViaNonce = true;
-          info.paid = true;
-          await env.NEWS_KV.put(`nonce:${p.nonce}`, JSON.stringify(info), { expirationTtl: 600 });
-        }
-      }
-    } catch {}
+// ---------------- ECOSYSTEM ----------------
 
-    const stars = Number(sp.total_amount) || 50;
-    const studio = alreadyViaNonce ? await getStudioState(env) : await addStarsCookie(env, stars);
+function resolveLink(val, fallback) {
+  const v = String(val || '').trim();
+  if (!v) return fallback;
+  if (v.startsWith('@')) return 'https://t.me/' + v.slice(1);
+  if (v.startsWith('http://') || v.startsWith('https://')) return v;
+  return fallback;
+}
 
-    await tgCall(env, 'sendMessage', {
-      chat_id: msg.chat.id,
-      text: stars >= 10000
-        ? `🥂👑 <b>БАНКЕТ НАКРЫТ!</b>\nТы занёс легендарные <b>${stars} ⭐</b>!\nZombie-DJ открывает шампанское, а Дядя Коля играет соляк до утра!`
-        : `🧟‍♂️🎸 <b>Хруст пошёл!</b>\nСпасибо за <b>${stars} ⭐</b> на печенье диджеям!\nZombie-DJ уже точит микрофон, а Дядя Коля наливает чай.`,
-      parse_mode: 'HTML',
+function getEcosystem(env) {
+  const botUser = String(env.BOT_USERNAME || 'zombie_rap_news_bot').replace(/^@/, '');
+  const channelUser = String(env.CHANNEL_USERNAME || 'zombie_news_flava').replace(/^@/, '');
+  return {
+    botUser,
+    channelUser,
+    channelUrl: 'https://t.me/' + channelUser,
+    botUrl: 'https://t.me/' + botUser,
+    projects: [
+      {
+        id: 'forest',
+        name: 'Forest Fortune 5x5',
+        desc: 'Сказочный слот-лес с каскадами, бонусами и духами природы.',
+        url: resolveLink(env.SLOTS_BOT || env.SLOTS_URL, 'https://t.me/ForestFortuneVegasBot'),
+        cta: 'Крутить лес',
+      },
+      {
+        id: 'durak',
+        name: 'Подкидной Дурак',
+        desc: 'Карточные баталии: проверка блефа и удачи за одним столом.',
+        url: resolveLink(env.DURAK_BOT || env.DURAK_URL, 'https://i-field.github.io/durak-mini-app/'),
+        cta: 'Срубить в Дурака',
+      },
+      {
+        id: 'roger',
+        name: 'Lucky Roger Slot',
+        desc: 'Пиратский азарт, сундуки удачи и быстрые спины.',
+        url: resolveLink(env.ROGER_BOT || env.ROGER_URL, 'https://i-field.github.io/lucky-roger-slot/'),
+        cta: 'К Роджеру',
+      },
+      {
+        id: 'music',
+        name: 'iField Music Lab',
+        desc: 'Лаборатория битов, саунда и музыкальных экспериментов.',
+        url: resolveLink(env.MUSIC_BOT || env.MUSIC_URL, 'https://i-field.github.io/ifield-music-lab/'),
+        cta: 'Открыть Lab',
+      },
+    ],
+  };
+}
+
+// ---------------- TELEGRAM UPDATES ----------------
+
+async function handleTelegramUpdate(env, update, origin) {
+  if (update.pre_checkout_query) {
+    await tgCall(env, 'answerPreCheckoutQuery', {
+      pre_checkout_query_id: update.pre_checkout_query.id,
+      ok: true,
     });
-
-    if (env.ADMIN_CHAT_ID && String(msg.chat.id) !== String(env.ADMIN_CHAT_ID) && !alreadyViaNonce) {
-      await tgCall(env, 'sendMessage', {
-        chat_id: env.ADMIN_CHAT_ID,
-        text: `🍩 <b>Прилетело ${stars} ⭐</b> от @${escapeHtml(msg.from?.username || msg.from?.first_name || 'слушателя')}\nВсего собрано: ${studio.cookiesTotal} ⭐`,
-        parse_mode: 'HTML',
-      });
-    }
     return;
   }
 
   if (update.callback_query) {
-    const cb = update.callback_query;
-    const data = cb.data || '';
-    const chatId = cb.message?.chat?.id;
-    const chatType = cb.message?.chat?.type || 'private';
-    const isPrivate = chatType === 'private';
-    const isAdmin = env.ADMIN_CHAT_ID && String(cb.from?.id) === String(env.ADMIN_CHAT_ID);
-
-    if (data === 'menu:cookie') {
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      await sendCookiePicker(env, chatId, origin, isPrivate);
-      return;
-    }
-
-    if (data === 'menu:projects') {
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      await sendProjectsShowcase(env, chatId, origin, isPrivate);
-      return;
-    }
-
-    if (data === 'grp:news') {
-      const ok = await checkRateLimit(env, `rl:gnews:${chatId}`, 600, 1);
-      if (!ok) {
-        await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ Свежую новость можно вызывать раз в 10 минут' });
-        return;
-      }
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '🎙 Готовлю свежий разнос в чат...' });
-      ctx.waitUntil(postTrackToGroup(env, chatId));
-      return;
-    }
-
-    if (data === 'grp:roast') {
-      const ok = await checkRateLimit(env, `rl:groast:${chatId}`, 300, 1);
-      if (!ok) {
-        await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ Перезарядка рифм 5 минут' });
-        return;
-      }
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '🎤 Сочиняю куплет про чат...' });
-      ctx.waitUntil(sendGroupRoast(env, chatId));
-      return;
-    }
-
-    if (data === 'menu:surprise') {
-      const facts = [
-        '🎤 В Зомби-Пульте можно включить бит 94 или 108 BPM и зачитать любой трек голосом поверх!',
-        '💡 Напиши смешную новость боту — диджеи могут сделать из неё трек в канал!',
-        '🎰 В нашем Forest Fortune 5x5 крутится 25 барабанов в стиле неонового Вегаса!',
-        '🃏 Можно прямо сейчас срубить партию в Подкидного Дурака!',
-        '🥂 Легенда гласит: кто накроет банкет за 10 000 ⭐, получит именной респект в канале.',
-      ];
-      const pick = facts[Math.floor(Math.random() * facts.length)];
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Лови фишку!' });
-      const btn = isPrivate
-        ? { text: '🎛 Открыть Звуковой Пульт', web_app: { url: `${origin}/` } }
-        : { text: '🎛 Открыть Звуковой Пульт', url: origin };
-      await tgCall(env, 'sendMessage', {
-        chat_id: chatId,
-        text: `✨ <b>Фишка студии:</b>\n${pick}`,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[btn]] },
-      });
-      return;
-    }
-
-    if (data.startsWith('buy:')) {
-      const packId = data.slice(4);
-      const pack = COOKIE_PACKS[packId];
-      if (!pack) {
-        await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Набор не найден' });
-        return;
-      }
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: `Открываю счёт на ${pack.stars} ⭐` });
-      await tgCall(env, 'sendInvoice', {
-        chat_id: chatId,
-        title: pack.title,
-        description: pack.desc,
-        payload: JSON.stringify({ pack: pack.id, src: 'bot', ts: Date.now() }),
-        provider_token: '',
-        currency: 'XTR',
-        prices: [{ label: pack.label, amount: pack.stars }],
-      });
-      return;
-    }
-
-    if (!isAdmin) {
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Только для продюсера студии' });
-      return;
-    }
-
-    if (data === 'adm:draft' || data === 'adm:post') {
-      const preview = data === 'adm:draft';
-      await tgCall(env, 'answerCallbackQuery', {
-        callback_query_id: cb.id,
-        text: preview ? 'Готовлю черновик...' : 'Генерирую выпуск в канал...',
-      });
-      ctx.waitUntil(runNewsCycle(env, { preview, style: 'auto', category: 'auto', source: 'admin_btn' }));
-      return;
-    }
-
-    if (data === 'adm:toggle_mode') {
-      const studio = await getStudioState(env);
-      studio.mode = studio.mode === 'auto' ? 'draft' : 'auto';
-      await saveStudioState(env, studio);
-      await tgCall(env, 'answerCallbackQuery', {
-        callback_query_id: cb.id,
-        text: `Режим крона: ${studio.mode === 'auto' ? 'Автопост в канал' : 'Черновики в ЛС'}`,
-      });
-      await sendAdminMenu(env, chatId, origin);
-      return;
-    }
-
-    if (data === 'adm:status') {
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      await sendStatusMessage(env, chatId);
-      return;
-    }
-
-    if (data === 'adm:inbox') {
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      await sendInboxMessage(env, chatId);
-      return;
-    }
-
-    if (data.startsWith('pub:')) {
-      const draftId = data.slice(4);
-      const draft = env.NEWS_KV ? await env.NEWS_KV.get(`draft:${draftId}`, 'json') : null;
-      if (!draft) {
-        await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Черновик устарел' });
-        return;
-      }
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Публикую в канал...' });
-      await publishPostToChannel(env, draft);
-      await env.NEWS_KV?.delete(`draft:${draftId}`);
-      await tgCall(env, 'editMessageReplyMarkup', {
-        chat_id: chatId,
-        message_id: cb.message.message_id,
-        reply_markup: { inline_keyboard: [] },
-      }).catch(() => {});
-      await tgCall(env, 'sendMessage', {
-        chat_id: chatId,
-        text: `✅ Выпуск опубликован в ${getChannelUsername(env)}!`,
-      });
-      return;
-    }
-
-    if (data.startsWith('regen:')) {
-      const draftId = data.slice(6);
-      await env.NEWS_KV?.delete(`draft:${draftId}`);
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Переписываю в другом стиле...' });
-      ctx.waitUntil(runNewsCycle(env, { preview: true, style: 'auto', category: 'auto', source: 'regen' }));
-      return;
-    }
-
-    if (data.startsWith('drop:')) {
-      const draftId = data.slice(5);
-      await env.NEWS_KV?.delete(`draft:${draftId}`);
-      await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Черновик удалён' });
-      await tgCall(env, 'editMessageReplyMarkup', {
-        chat_id: chatId,
-        message_id: cb.message.message_id,
-        reply_markup: { inline_keyboard: [] },
-      }).catch(() => {});
-      return;
-    }
-
-    await tgCall(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+    await handleCallback(env, update.callback_query, origin);
     return;
   }
 
+  const msg = update.message;
   if (!msg) return;
-  const chatId = msg.chat.id;
-  const chatType = msg.chat.type;
+
+  if (msg.successful_payment) {
+    await handleSuccessfulPayment(env, msg);
+    return;
+  }
+
+  const chat = msg.chat || {};
+  const chatType = chat.type || 'private';
 
   if (chatType === 'group' || chatType === 'supergroup') {
-    await handleGroupMessage(msg, env, ctx, origin);
+    await handleGroupMessage(env, msg, origin);
     return;
   }
 
-  if (!msg.text || chatType !== 'private') return;
-  const text = msg.text.trim();
-  const isAdmin = env.ADMIN_CHAT_ID && String(msg.from?.id) === String(env.ADMIN_CHAT_ID);
+  if (chatType === 'private') {
+    await handlePrivateMessage(env, msg, origin);
+  }
+}
 
-  if (text.startsWith('/start')) {
-    const param = text.split(/\s+/)[1] || '';
-    if (param === 'cookie') {
-      await sendCookiePicker(env, chatId, origin, true);
-      return;
+async function handleSuccessfulPayment(env, msg) {
+  let payload = {};
+  try {
+    payload = JSON.parse(msg.successful_payment.invoice_payload || '{}');
+  } catch (_) {}
+  const pack = COOKIE_PACKS[payload.packId] || COOKIE_PACKS.cookie_50;
+
+  let alreadyCounted = false;
+  if (payload.nonce && env.NEWS_KV) {
+    const inv = await env.NEWS_KV.get('inv:' + payload.nonce, 'json');
+    if (inv && inv.used) alreadyCounted = true;
+    else if (inv) {
+      inv.used = true;
+      await env.NEWS_KV.put('inv:' + payload.nonce, JSON.stringify(inv), { expirationTtl: 3600 });
     }
-    if (param === 'projects') {
-      await sendProjectsShowcase(env, chatId, origin, true);
-      return;
-    }
-    await sendWelcomeMessage(env, chatId, origin, isAdmin);
-    return;
   }
 
-  if (text === '/projects') {
-    await sendProjectsShowcase(env, chatId, origin, true);
-    return;
-  }
-
-  if (text === '/cookie') {
-    await sendCookiePicker(env, chatId, origin, true);
-    return;
-  }
-
-  if (text === '/status') {
-    await sendStatusMessage(env, chatId);
-    return;
-  }
-
-  if (text === '/news' || text === '/roast') {
-    await tgCall(env, 'sendMessage', {
-      chat_id: chatId,
-      text: 'Команды /news и /roast работают прямо в групповых чатах — добавь меня в группу и проверь! А здесь можно просто прислать тему для трека.',
+  if (!alreadyCounted) {
+    await updateStats(env, (s) => {
+      s.paidCookies = (s.paidCookies || 0) + pack.cookies;
+      s.starsTotal = (s.starsTotal || 0) + pack.stars;
+      if (pack.isBanquet) s.banquets = (s.banquets || 0) + 1;
     });
-    return;
   }
 
-  if (text === '/draft' || text === '/run') {
-    if (!isAdmin) {
-      await tgCall(env, 'sendMessage', { chat_id: chatId, text: 'Эта команда только для админа студии.' });
-      return;
-    }
-    const preview = text === '/draft';
-    await tgCall(env, 'sendMessage', {
-      chat_id: chatId,
-      text: preview ? '⏳ Готовлю черновик выпуска...' : '🚀 Запускаю внеочередной эфир в канал...',
-    });
-    ctx.waitUntil(runNewsCycle(env, { preview, style: 'auto', category: 'auto', source: 'cmd' }));
-    return;
-  }
+  const name = escapeHtml((msg.from && msg.from.first_name) || 'Братишка');
+  const txt = pack.isBanquet
+    ? '🥂 <b>ЛЕГЕНДАРНЫЙ БАНКЕТ!</b>\n' + name + ', вся студия Zombie News Flava стоя аплодирует! Заряд: +' + pack.cookies + ' печенек.'
+    : '🍪 <b>Спасибо за подгон, ' + name + '!</b>\nСтудия получила +' + pack.cookies + ' печенек. Биты стали качать громче!';
 
-  if (!text.startsWith('/')) {
-    const clean = text.replace(/\s+/g, ' ').trim();
-    if (clean.length < 6) {
-      await tgCall(env, 'sendMessage', {
-        chat_id: chatId,
-        text: 'Напиши тему или смешную новость подлиннее (от 6 символов) — закину в предложку диджеям!',
+  await tgCall(env, 'sendMessage', {
+    chat_id: msg.chat.id,
+    text: txt,
+    parse_mode: 'HTML',
+  });
+}
+
+async function handleCallback(env, cq, origin) {
+  const data = String(cq.data || '');
+  const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  const chatType = cq.message && cq.message.chat && cq.message.chat.type;
+  const isPrivate = chatType === 'private';
+
+  await tgCall(env, 'answerCallbackQuery', { callback_query_id: cq.id });
+
+  if (!chatId) return;
+
+  if (data.startsWith('cookie_buy:')) {
+    const packId = data.split(':')[1];
+    const pack = COOKIE_PACKS[packId];
+    if (!pack) return;
+    const nonce = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    if (env.NEWS_KV) {
+      await env.NEWS_KV.put('inv:' + nonce, JSON.stringify({ packId: pack.id, stars: pack.stars, used: false }), {
+        expirationTtl: 3600,
       });
-      return;
     }
-    const allowed = await checkRateLimit(env, `rl:dm:${msg.from?.id || chatId}`, 600, 1);
-    if (!allowed) {
-      await tgCall(env, 'sendMessage', {
-        chat_id: chatId,
-        text: '⏳ Предложку можно отправлять раз в 10 минут — твой прошлый заказ уже в очереди!',
-      });
-      return;
-    }
-    const inbox = await getInbox(env);
-    const author = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name || 'Слушатель');
-    inbox.unshift({
-      id: crypto.randomUUID().slice(0, 8),
-      text: clean.slice(0, 180),
-      style: 'auto',
-      author,
-      ts: Date.now(),
+    await tgCall(env, 'sendInvoice', {
+      chat_id: chatId,
+      title: pack.title,
+      description: pack.desc,
+      payload: JSON.stringify({ packId: pack.id, nonce }),
+      currency: 'XTR',
+      prices: [{ label: pack.title, amount: pack.stars }],
     });
-    await saveInbox(env, inbox.slice(0, 25));
+    return;
+  }
 
+  if (data === 'show_games') {
+    await sendGamesMenu(env, chatId, isPrivate, origin);
+    return;
+  }
+
+  if (data === 'show_cookies') {
+    await sendCookieMenu(env, chatId, isPrivate, origin);
+    return;
+  }
+
+  if (data === 'group_roast') {
+    await sendGroupRoast(env, chatId, cq.from, origin, isPrivate);
+    return;
+  }
+
+  if (data === 'group_news') {
+    await sendGroupNews(env, chatId, origin, isPrivate);
+  }
+}
+
+// ---------------- PRIVATE DM CHAT ----------------
+
+async function handlePrivateMessage(env, msg, origin) {
+  const chatId = msg.chat.id;
+  const text = String(msg.text || msg.caption || '').trim();
+  if (!text) return;
+
+  const cmd = text.split(/\s+/)[0].toLowerCase().split('@')[0];
+
+  if (cmd === '/start') {
+    const eco = getEcosystem(env);
+    const name = escapeHtml((msg.from && msg.from.first_name) || 'слушатель');
     await tgCall(env, 'sendMessage', {
       chat_id: chatId,
-      text: `💡 <b>Тема принята в студию!</b>\n«${escapeHtml(clean.slice(0, 180))}»\n\nЗагляни в пульт или попробуй наши игры 👇`,
+      text:
+        '🧟‍♂️ <b>Салют, ' + name + '! На связи Zombie-DJ и Дядя Коля Мертвец.</b>\n\n' +
+        'Можешь просто писать мне сюда любым текстом — поболтаем, разберём новости, сделаю прожарку или подкину игру.\n\n' +
+        '• <b>/games</b> — все твои игры и проекты\n' +
+        '• <b>/roast</b> — зачитать прожарку\n' +
+        '• <b>/cookie</b> — угостить студию печеньем\n' +
+        '• <b>/ping</b> — проверить связь и AI',
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🎛 Открыть Зомби-Пульт', web_app: { url: `${origin}/` } }],
-          [{ text: '🎮 Наши игры и проекты', callback_data: 'menu:projects' }],
+          [{ text: '🎛 Открыть Студию и Игры', web_app: { url: origin + '/' } }],
+          [
+            { text: '🎮 Проекты i-Field', callback_data: 'show_games' },
+            { text: '🍪 Угостить диджеев', callback_data: 'show_cookies' },
+          ],
+          [{ text: '📢 Канал @' + eco.channelUser, url: eco.channelUrl }],
         ],
       },
     });
-    if (env.ADMIN_CHAT_ID && !isAdmin) {
-      await tgCall(env, 'sendMessage', {
-        chat_id: env.ADMIN_CHAT_ID,
-        text: `💡 <b>Предложка из ЛС</b> от ${escapeHtml(author)}:\n«${escapeHtml(clean.slice(0, 180))}»`,
-        parse_mode: 'HTML',
-      }).catch(() => {});
+    return;
+  }
+
+  if (cmd === '/ping') {
+    await handlePingCommand(env, msg, text);
+    return;
+  }
+
+  if (cmd === '/games' || cmd === '/projects') {
+    await sendGamesMenu(env, chatId, true, origin);
+    return;
+  }
+
+  if (cmd === '/cookie') {
+    await sendCookieMenu(env, chatId, true, origin);
+    return;
+  }
+
+  if (cmd === '/roast') {
+    await sendGroupRoast(env, chatId, msg.from, origin, true);
+    return;
+  }
+
+  if (cmd === '/draft') {
+    if (env.ADMIN_CHAT_ID && String(msg.from && msg.from.id) !== String(env.ADMIN_CHAT_ID)) {
+      await tgCall(env, 'sendMessage', { chat_id: chatId, text: '⛔ Команда только для админа студии.' });
+      return;
     }
+    await tgCall(env, 'sendMessage', { chat_id: chatId, text: '🎙 Собираю черновик выпуска для тебя...' });
+    const res = await runNewsEdition(env, { force: true, targetChat: chatId });
+    if (!res.ok) {
+      await tgCall(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Не вышло: ' + (res.error || 'ошибка') });
+    }
+    return;
+  }
+
+  // Plain conversational message in private DM!
+  if (!allowRate('dm:' + chatId, 2000)) return;
+  await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+
+  const memKey = 'dm:' + chatId;
+  const state = await getChatMem(env, memKey);
+  const userName = (msg.from && (msg.from.first_name || msg.from.username)) || 'Слушатель';
+  pushChatLine(state, userName, text);
+
+  try {
+    const aiOut = await generateChatReply(env, 'private', state, text, userName);
+    pushChatLine(state, aiOut.persona === 'kolya' ? 'Дядя Коля' : 'Zombie-DJ', aiOut.reply);
+    await flushChatMem(env, memKey, state, false);
+
+    const prefix = aiOut.persona === 'kolya' ? '🎸 <b>Дядя Коля:</b> ' : '🎤 <b>Zombie-DJ:</b> ';
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: prefix + escapeHtml(aiOut.reply),
+      parse_mode: 'HTML',
+      reply_markup: buildCtaMarkup(env, origin, aiOut.cta, true),
+    });
+  } catch (err) {
+    console.error('Private AI error:', err);
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: '⚠️ Студийный AI временно не ответил: ' + String(err.message || err).slice(0, 140),
+    });
   }
 }
 
-/* ---------------- Group AI Engine & Context Behavior ---------------- */
+// ---------------- GROUP AI ENGINE ----------------
 
-async function getGroupMemory(env, chatId) {
-  const key = `grp:${chatId}`;
-  if (GROUP_MEM.has(key)) return GROUP_MEM.get(key);
-  const def = { messages: [], members: [], msgSinceBot: 0, lastBotTs: 0 };
-  if (!env.NEWS_KV) {
-    GROUP_MEM.set(key, def);
-    return def;
-  }
-  const saved = await env.NEWS_KV.get(key, 'json');
-  const state = saved ? { ...def, ...saved } : def;
-  GROUP_MEM.set(key, state);
-  return state;
-}
-
-async function saveGroupMemory(env, chatId, state, forceKv = false) {
-  const key = `grp:${chatId}`;
-  GROUP_MEM.set(key, state);
-  if (!env.NEWS_KV) return;
-  if (forceKv || state.msgSinceBot % 5 === 0) {
-    await env.NEWS_KV.put(key, JSON.stringify(state), { expirationTtl: 86400 * 7 });
-  }
-}
-
-async function handleGroupMessage(msg, env, ctx, origin) {
+async function handleGroupMessage(env, msg, origin) {
   const chatId = msg.chat.id;
-  const botUsername = getBotUsername(env);
+  const memKey = 'grp:' + chatId;
 
+  // 1. Greet new chat members
   if (Array.isArray(msg.new_chat_members) && msg.new_chat_members.length > 0) {
-    const joinedSelf = msg.new_chat_members.some(
-      (m) => m.is_bot && (m.username || '').toLowerCase() === botUsername.toLowerCase()
-    );
-    if (joinedSelf) {
+    const humans = msg.new_chat_members.filter((u) => !u.is_bot);
+    if (humans.length > 0) {
+      const names = humans.map((u) => escapeHtml(u.first_name || u.username || 'боец')).join(', ');
+      const eco = getEcosystem(env);
       await tgCall(env, 'sendMessage', {
         chat_id: chatId,
         text:
-          `🧟‍♂️🎸 <b>Zombie-DJ и Дядя Коля зашли в чат!</b>\n` +
-          `Мы следим за вайбом, подкидываем новости, можем зачитать рэп про участников (/roast), позвать в <b>Дурака</b> или проверить вашу удачу в <b>Слотах</b>.\n\n` +
-          `<i>Совет админу: чтобы я понимал весь контекст чата, отключи Group Privacy в @BotFather или выдай мне права админа.</i>`,
+          '🧟‍♂️ О, свежая кровь в эфире — салют, <b>' + names + '</b>!\n' +
+          'Мы тут с Дядей Колей крутим новости, делаем прожарки и рубимся в игры.\n\n' +
+          'Можете звать меня по имени («Зомби», «Дядя Коля», @' + eco.botUser + ') или сразу жмите кнопку:',
         parse_mode: 'HTML',
-        reply_markup: buildGroupActionMarkup('studio', env, origin),
-      });
-      return;
-    }
-    const human = msg.new_chat_members.find((m) => !m.is_bot);
-    if (human) {
-      const name = escapeHtml(human.first_name || human.username || 'боец');
-      await tgCall(env, 'sendMessage', {
-        chat_id: chatId,
-        text: `👋 О, <b>${name}</b> заглянул в некро-бар! Садись ближе к пульту — хочешь в Дурака перекинемся или удачу в слотах проверим?`,
-        parse_mode: 'HTML',
-        reply_markup: buildGroupActionMarkup('durak', env, origin),
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '🃏 Срубить в Дурака', url: eco.projects[1].url },
+              { text: '🌲 Forest Fortune', url: eco.projects[0].url },
+            ],
+            [
+              { text: '🔥 Прожарить чат', callback_data: 'group_roast' },
+              { text: '📰 Кинуть новость', callback_data: 'group_news' },
+            ],
+          ],
+        },
       });
     }
     return;
   }
 
-  const rawText = (msg.text || msg.caption || '').trim();
-  if (!rawText || msg.from?.is_bot) return;
+  if (msg.from && msg.from.is_bot) return;
 
-  const cmd = rawText.split(/\s+/)[0].toLowerCase().replace(`@${botUsername.toLowerCase()}`, '');
-  if (cmd === '/projects' || cmd === '/games' || cmd === '/start') {
-    await sendProjectsShowcase(env, chatId, origin, false);
+  const text = String(msg.text || msg.caption || '').trim();
+  if (!text) return;
+
+  const botUsername = String(env.BOT_USERNAME || 'zombie_rap_news_bot').replace(/^@/, '').toLowerCase();
+  const rawCmd = text.split(/\s+/)[0].toLowerCase();
+  const cmdParts = rawCmd.split('@');
+  const cmd = cmdParts[0];
+  const cmdTarget = cmdParts[1] || '';
+
+  if (cmdTarget && cmdTarget !== botUsername) return;
+
+  if (cmd === '/ping') {
+    await handlePingCommand(env, msg, text);
+    return;
+  }
+  if (cmd === '/games' || cmd === '/projects') {
+    await sendGamesMenu(env, chatId, false, origin);
     return;
   }
   if (cmd === '/cookie') {
-    await sendCookiePicker(env, chatId, origin, false);
-    return;
-  }
-  if (cmd === '/news') {
-    const ok = await checkRateLimit(env, `rl:gnews:${chatId}`, 600, 1);
-    if (!ok) {
-      await tgCall(env, 'sendMessage', { chat_id: chatId, text: '⏳ Свежий выпуск в группу можно вызывать раз в 10 минут.' });
-      return;
-    }
-    await tgCall(env, 'sendMessage', { chat_id: chatId, text: '🎙 Ща подгоню свежак по новостям...' });
-    ctx.waitUntil(postTrackToGroup(env, chatId));
+    await sendCookieMenu(env, chatId, false, origin);
     return;
   }
   if (cmd === '/roast') {
-    const ok = await checkRateLimit(env, `rl:groast:${chatId}`, 300, 1);
-    if (!ok) {
-      await tgCall(env, 'sendMessage', { chat_id: chatId, text: '⏳ Дай диджеям 5 минут перевести дух перед новым треком про чат.' });
-      return;
-    }
-    ctx.waitUntil(sendGroupRoast(env, chatId));
+    await sendGroupRoast(env, chatId, msg.from, origin, false);
     return;
   }
-
-  if (rawText.startsWith('/')) return;
-
-  const senderName = msg.from?.first_name || msg.from?.username || 'Участник';
-  const mem = await getGroupMemory(env, chatId);
-  mem.messages.push({
-    name: senderName.slice(0, 28),
-    text: rawText.slice(0, 160),
-    ts: Date.now(),
-  });
-  mem.messages = mem.messages.slice(-14);
-  if (!mem.members.includes(senderName)) {
-    mem.members = [senderName, ...mem.members].slice(0, 15);
+  if (cmd === '/news') {
+    await sendGroupNews(env, chatId, origin, false);
+    return;
   }
-  mem.msgSinceBot = (mem.msgSinceBot || 0) + 1;
+  if (cmd.startsWith('/')) return;
 
-  const lower = rawText.toLowerCase();
-  const isReplyToBot = Boolean(msg.reply_to_message?.from?.is_bot);
-  const isMention = lower.includes(`@${botUsername.toLowerCase()}`) || /(^|\s)(зомби|дядя коля|диджей|zombie)(\s|[,.!?]|$)/i.test(lower);
-  const isKeywordTrigger = /(скучно|во что поиграть|в картишки|в дурака|проверить удачу|слоты|крутануть|новост)/i.test(lower);
+  // Record incoming human message in RAM first (0 KV writes!)
+  const state = await getChatMem(env, memKey);
+  const authorName = (msg.from && (msg.from.first_name || msg.from.username)) || 'Участник';
+  pushChatLine(state, authorName, text);
+  state.msgSinceBot = (state.msgSinceBot || 0) + 1;
+
+  const decision = shouldReplyInGroup(msg, text, state, botUsername);
+  if (!decision.reply) return;
+
+  // Anti-spam cooldown on non-direct triggers
+  const now = Date.now();
+  if (!decision.direct && now - (state.lastBotAt || 0) < 12000) return;
+
+  try {
+    await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+    const aiOut = await generateChatReply(env, 'group', state, text, authorName);
+
+    state.lastBotAt = Date.now();
+    state.msgSinceBot = 0;
+    pushChatLine(state, aiOut.persona === 'kolya' ? 'Дядя Коля' : 'Zombie-DJ', aiOut.reply);
+
+    // Flush to KV only at most once every 3 minutes!
+    await flushChatMem(env, memKey, state, false);
+
+    const prefix = aiOut.persona === 'kolya' ? '🎸 <b>Дядя Коля:</b> ' : '🎤 <b>Zombie-DJ:</b> ';
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: prefix + escapeHtml(aiOut.reply),
+      parse_mode: 'HTML',
+      reply_to_message_id: decision.direct ? msg.message_id : undefined,
+      reply_markup: buildCtaMarkup(env, origin, aiOut.cta, false),
+    });
+  } catch (err) {
+    console.error('Group AI error:', err);
+    if (decision.direct) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: chatId,
+        reply_to_message_id: msg.message_id,
+        text: '⚠️ Микрофон сбоит (' + String(err.message || err).slice(0, 120) + ')',
+      });
+    }
+  }
+}
+
+function shouldReplyInGroup(msg, text, state, botUsername) {
+  const lower = text.toLowerCase();
+  const replyUser = msg.reply_to_message && msg.reply_to_message.from && msg.reply_to_message.from.username;
+  const isReplyToBot = Boolean(replyUser && replyUser.toLowerCase() === botUsername);
+  const isMention = lower.includes('@' + botUsername);
+
+  const hasTriggerWord = /(^|[^а-яёa-z0-9])(зомби|коля|колян|мертвец|диджей|dj|бот|нейросет|дурак|картишк|слот|роджер|фортун|игр|музык|рэп|шансон|трек|новост|скучно|прожар|печень|банкет|привет всем|кто тут|че по новостям|что нового|погнали|сыграем)([^а-яёa-z0-9]|$)/i.test(
+    lower
+  );
+
+  if (isReplyToBot || isMention) {
+    return { reply: true, direct: true };
+  }
+  if (hasTriggerWord) {
+    return { reply: true, direct: true };
+  }
 
   const now = Date.now();
-  const sinceReplyMs = now - (mem.lastBotTs || 0);
-  const direct = isReplyToBot || isMention || isKeywordTrigger;
-  const spontaneous = !direct && mem.msgSinceBot >= 10 && sinceReplyMs > 10 * 60 * 1000;
+  const elapsed = now - (state.lastBotAt || 0);
 
-  if (!direct && !spontaneous) {
-    await saveGroupMemory(env, chatId, mem, false);
-    return;
+  if (text.includes('?') && text.length >= 8 && (state.msgSinceBot || 0) >= 2 && elapsed >= 45000) {
+    return { reply: true, direct: false };
   }
 
-  if (direct && sinceReplyMs < 15000) {
-    await saveGroupMemory(env, chatId, mem, false);
-    return;
+  if (text.length >= 5 && (state.msgSinceBot || 0) >= 4 && elapsed >= 60000) {
+    return { reply: true, direct: false };
   }
 
-  mem.msgSinceBot = 0;
-  mem.lastBotTs = now;
-  await saveGroupMemory(env, chatId, mem, true);
-
-  ctx.waitUntil(respondInGroupWithAI(env, chatId, msg.message_id, senderName, rawText, mem, origin));
+  return { reply: false, direct: false };
 }
 
-async function respondInGroupWithAI(env, chatId, replyToId, senderName, currentText, mem, origin) {
-  const history = mem.messages.slice(-12).map((m) => `${m.name}: ${m.text}`).join('\n');
-  const prompt =
-    `Ты — харизматичный ведущий чата (выбирай по ситуации голос дерзкого Zombie-DJ или ироничного гитариста Дяди Коли Мертвеца).\n` +
-    `Вот последние сообщения участников группы:\n${history}\n\n` +
-    `Сейчас написал(а) ${senderName}: "${currentText}".\n` +
-    `Ответь естественно, живо и коротко (1–3 предложения на русском), учитывая имена участников и тему разговора.\n` +
-    `Можешь подстегнуть участников, пошутить или органично предложить одну из активностей студии:\n` +
-    `- durak: "срубить в картишки в Дурака"\n` +
-    `- slots: "проверить удачу в слотах Forest Fortune 5x5 или Lucky Roger"\n` +
-    `- news: "подкинуть свежий сатирический выпуск новостей"\n` +
-    `- studio: "покрутить живой бит в Зомби-Пульте"\n` +
-    `- cookie: "угостить диджеев печеньем"\n` +
-    `- none: если сейчас уместнее просто меткая реплика без призыва.\n\n` +
-    `Верни СТРОГО JSON: {"reply": "текст ответа", "action": "durak|slots|news|studio|cookie|none"}`;
+async function handlePingCommand(env, msg, text) {
+  const chatId = msg.chat.id;
+  const memKey = (msg.chat.type === 'private' ? 'dm:' : 'grp:') + chatId;
+  const mem = RAM_CHATS.get(memKey);
+  const testAi = text.toLowerCase().includes('ai');
 
-  try {
-    const out = await callGeminiJson(env, prompt, {
-      type: 'OBJECT',
-      properties: {
-        reply: { type: 'STRING' },
-        action: { type: 'STRING' },
-      },
-      required: ['reply', 'action'],
-    });
-    if (!out?.reply) return;
-    const action = ['durak', 'slots', 'news', 'studio', 'cookie', 'none'].includes(out.action) ? out.action : 'none';
-    await tgCall(env, 'sendMessage', {
-      chat_id: chatId,
-      reply_to_message_id: replyToId,
-      text: escapeHtml(String(out.reply).slice(0, 700)),
-      parse_mode: 'HTML',
-      reply_markup: buildGroupActionMarkup(action, env, origin),
-    });
-  } catch {}
-}
-
-async function sendGroupRoast(env, chatId) {
-  const mem = await getGroupMemory(env, chatId);
-  const history = mem.messages.slice(-12).map((m) => `${m.name}: ${m.text}`).join('\n') || 'В чате пока тишина, все греют диван.';
-  const prompt =
-    `Ты — Zombie-DJ и Дядя Коля Мертвец. Напиши короткий смешной и дружелюбный куплет (6 строк в рифму, без мата) про участников этого чата на основе их переписки:\n${history}\n\n` +
-    `Верни СТРОГО JSON: {"title": "заголовок до 50 символов", "verse": "6 строк через \\n"}`;
-
-  try {
-    const out = await callGeminiJson(env, prompt, {
-      type: 'OBJECT',
-      properties: {
-        title: { type: 'STRING' },
-        verse: { type: 'STRING' },
-      },
-      required: ['title', 'verse'],
-    });
-    if (!out?.verse) return;
-    await tgCall(env, 'sendMessage', {
-      chat_id: chatId,
-      text: `🎤 <b>${escapeHtml(out.title || 'Куплет про наш чат')}</b>\n\n${escapeHtml(out.verse)}`,
-      parse_mode: 'HTML',
-      reply_markup: buildGroupActionMarkup('studio', env),
-    });
-  } catch {}
-}
-
-async function postTrackToGroup(env, chatId) {
-  try {
-    const studio = await getStudioState(env);
-    const cat = pickNextCategory(studio);
-    const style = pickNextStyle(studio);
-    const story = await fetchFreshStory(env, cat, studio.seenIds || []);
-    if (!story) {
-      await tgCall(env, 'sendMessage', { chat_id: chatId, text: 'Сегодня RSS-ленты молчат, попробуй позже!' });
-      return;
+  let aiDiag = env.GEMINI_API_KEY ? 'ключ есть' : 'НЕТ GEMINI_API_KEY';
+  if (testAi && env.GEMINI_API_KEY) {
+    const t0 = Date.now();
+    try {
+      const r = await callGeminiText(env, {
+        systemInstruction: 'Ответь одним коротким словом: Принято.',
+        prompt: 'Проверка связи.',
+        json: false,
+      });
+      aiDiag = 'OK (' + r.model + ', ' + (Date.now() - t0) + 'ms)';
+    } catch (e) {
+      aiDiag = 'ОШИБКА: ' + String(e.message || e).slice(0, 120);
     }
-    const track = await generateTrackWithGemini(env, story, style);
-    const caption =
-      `${STYLE_LABELS[style]} · ${CATEGORY_LABELS[cat]}\n\n` +
-      `<b>${escapeHtml(track.headline)}</b>\n\n` +
-      `${escapeHtml(track.lyrics)}\n\n` +
-      `💬 <i>${escapeHtml(track.punchline)}</i>`;
+  }
 
-    await tgCall(env, 'sendMessage', {
-      chat_id: chatId,
-      text: caption.slice(0, 3900),
-      parse_mode: 'HTML',
-      reply_markup: buildGroupActionMarkup('news', env),
-    });
-  } catch {}
+  await tgCall(env, 'sendMessage', {
+    chat_id: chatId,
+    reply_to_message_id: msg.message_id,
+    text:
+      '📡 <b>Диагностика студии</b>\n' +
+      '• Чат: <code>' + msg.chat.type + '</code>\n' +
+      '• В памяти RAM: ' + (mem ? mem.msgs.length : 0) + ' сообщ.\n' +
+      '• KV: ' + (env.NEWS_KV ? 'подключён' : 'нет') + '\n' +
+      '• Gemini: ' + escapeHtml(aiDiag) + '\n' +
+      (testAi ? '' : '\n💡 Напиши <code>/ping ai</code> чтобы проверить живой ответ нейросети.'),
+    parse_mode: 'HTML',
+  });
 }
 
-function buildGroupActionMarkup(action, env, origin = '') {
-  const bot = getBotUsername(env);
-  const durakUrl = getDurakUrl(env);
-  const slotsBot = getSlotsBot(env);
-  const rogerUrl = getRogerUrl(env);
-  const channel = getChannelUsername(env).replace(/^@/, '');
+// ---------------- RAM-FIRST CHAT MEMORY ----------------
 
-  if (action === 'durak') {
+async function getChatMem(env, key) {
+  let state = RAM_CHATS.get(key);
+  if (state) return state;
+
+  let loaded = null;
+  if (env.NEWS_KV) {
+    try {
+      loaded = await env.NEWS_KV.get(key, 'json');
+    } catch (_) {}
+  }
+
+  state = {
+    msgs: Array.isArray(loaded && loaded.msgs) ? loaded.msgs.slice(-14) : [],
+    msgSinceBot: Number(loaded && loaded.msgSinceBot) || 0,
+    lastBotAt: Number(loaded && loaded.lastBotAt) || 0,
+    lastKvWriteAt: Date.now(),
+  };
+
+  if (RAM_CHATS.size >= MAX_RAM_CHATS) {
+    const oldestKey = RAM_CHATS.keys().next().value;
+    if (oldestKey) RAM_CHATS.delete(oldestKey);
+  }
+  RAM_CHATS.set(key, state);
+  return state;
+}
+
+function pushChatLine(state, name, text) {
+  state.msgs.push({
+    n: String(name || 'Юзер').slice(0, 28),
+    t: String(text || '').replace(/\s+/g, ' ').slice(0, 220),
+  });
+  if (state.msgs.length > 14) {
+    state.msgs = state.msgs.slice(-14);
+  }
+}
+
+async function flushChatMem(env, key, state, force) {
+  if (!env.NEWS_KV) return;
+  const now = Date.now();
+  if (!force && now - (state.lastKvWriteAt || 0) < KV_FLUSH_INTERVAL_MS) {
+    return;
+  }
+  state.lastKvWriteAt = now;
+  try {
+    await env.NEWS_KV.put(
+      key,
+      JSON.stringify({
+        msgs: state.msgs.slice(-14),
+        msgSinceBot: state.msgSinceBot || 0,
+        lastBotAt: state.lastBotAt || 0,
+      }),
+      { expirationTtl: 604800 }
+    );
+  } catch (e) {
+    console.error('KV flush error:', e);
+  }
+}
+
+// ---------------- AI CONVERSATION ----------------
+
+async function generateChatReply(env, mode, state, currentText, authorName) {
+  const history = state.msgs.map((m) => m.n + ': ' + m.t).join('\n');
+  const systemInstruction =
+    'Ты — дуэт ведущих Telegram-студии Zombie News Flava: Zombie-DJ (дерзкий уличный рэпер и битмейкер) и Дядя Коля Мертвец (ироничный ветеран кибер-шансона).\n' +
+    'Режим: ' + (mode === 'private' ? 'личная переписка 1-на-1 с пользователем' : 'живой групповой чат') + '.\n' +
+    'Правила:\n' +
+    '1. Выбери, кто сейчас отвечает: "zombie" или "kolya".\n' +
+    '2. Отвечай живо, коротко (2–4 предложения), по-русски, с юмором и учётом имён и контекста переписки.\n' +
+    '3. Никогда не звучи как скучный справочный ассистент. Не повторяй чужие слова дословно.\n' +
+    '4. Иногда, когда это органично по разговору (скука, азарт, отдых, музыка, новости), можешь предложить:\n' +
+    '   - "durak": срубить в Подкидного Дурака\n' +
+    '   - "slots": крутануть Forest Fortune 5x5\n' +
+    '   - "roger": заглянуть в пиратский слот Lucky Roger\n' +
+    '   - "music": послушать биты в iField Music Lab\n' +
+    '   - "news": обсудить свежую новость дня\n' +
+    '   - "studio": открыть студию\n' +
+    '   - "cookie": угостить диджеев печеньем\n' +
+    '   - "none": если кнопка сейчас не нужна (чаще всего используй "none" в обычной болтовне!).\n' +
+    'Верни СТРОГО JSON формата: {"persona":"zombie"|"kolya","reply":"текст ответа","cta":"none"|"durak"|"slots"|"roger"|"music"|"news"|"studio"|"cookie"}.';
+
+  const prompt =
+    'Последние реплики:\n' + history + '\n\nТекущее сообщение от ' + authorName + ':\n' + currentText;
+
+  const res = await callGeminiText(env, {
+    systemInstruction,
+    prompt,
+    json: true,
+    thinkingLevel: 'LOW',
+  });
+
+  const parsed = parseJsonSafe(res.text);
+  if (parsed && parsed.reply) {
     return {
-      inline_keyboard: [[
-        { text: '🃏 Срубить в Дурака', url: durakUrl },
-        { text: '🎰 Слоты 5x5', url: `https://t.me/${slotsBot}` },
-      ]],
+      persona: parsed.persona === 'kolya' ? 'kolya' : 'zombie',
+      reply: String(parsed.reply).slice(0, 750),
+      cta: String(parsed.cta || 'none'),
     };
   }
-  if (action === 'slots') {
+  return {
+    persona: 'zombie',
+    reply: String(res.text || 'На связи!').replace(/[{}"]/g, '').slice(0, 750),
+    cta: 'none',
+  };
+}
+
+function buildCtaMarkup(env, origin, cta, isPrivate) {
+  const eco = getEcosystem(env);
+  if (!cta || cta === 'none') return undefined;
+
+  if (cta === 'durak') {
+    return { inline_keyboard: [[{ text: '🃏 Срубить в Дурака', url: eco.projects[1].url }]] };
+  }
+  if (cta === 'slots') {
+    return { inline_keyboard: [[{ text: '🌲 Forest Fortune 5x5', url: eco.projects[0].url }]] };
+  }
+  if (cta === 'roger') {
+    return { inline_keyboard: [[{ text: '🏴‍☠️ Lucky Roger Slot', url: eco.projects[2].url }]] };
+  }
+  if (cta === 'music') {
+    return { inline_keyboard: [[{ text: '🎛 iField Music Lab', url: eco.projects[3].url }]] };
+  }
+  if (cta === 'news') {
     return {
-      inline_keyboard: [[
-        { text: '🎰 Forest Fortune 5x5', url: `https://t.me/${slotsBot}` },
-        { text: '🏴‍☠️ Lucky Roger', url: rogerUrl },
-      ]],
+      inline_keyboard: [
+        [
+          { text: '📰 Свежая новость', callback_data: 'group_news' },
+          { text: '📢 Канал', url: eco.channelUrl },
+        ],
+      ],
     };
   }
-  if (action === 'news') {
-    return {
-      inline_keyboard: [[
-        { text: '📰 Ещё выпуск', callback_data: 'grp:news' },
-        { text: '📢 Канал', url: `https://t.me/${channel}` },
-      ]],
-    };
+  if (cta === 'cookie') {
+    return { inline_keyboard: [[{ text: '🍪 Угостить диджеев', callback_data: 'show_cookies' }]] };
   }
-  if (action === 'studio') {
+  if (cta === 'studio') {
     return {
-      inline_keyboard: [[
-        { text: '🎛 Звуковой пульт', url: origin || `https://t.me/${bot}` },
-        { text: '🃏 В Дурака', url: durakUrl },
-      ]],
-    };
-  }
-  if (action === 'cookie') {
-    return {
-      inline_keyboard: [[
-        { text: '🍩 Угостить диджеев', url: `https://t.me/${bot}?start=cookie` },
-      ]],
+      inline_keyboard: [
+        [isPrivate ? { text: '🎛 Открыть Студию', web_app: { url: origin + '/' } } : { text: '🎛 Открыть Студию', url: eco.botUrl }],
+      ],
     };
   }
   return undefined;
 }
 
-/* ---------------- Welcome, Showcase & Admin Menus ---------------- */
+// ---------------- GROUP ACTIONS: ROAST, NEWS, GAMES, COOKIES ----------------
 
-async function sendWelcomeMessage(env, chatId, origin, isAdmin) {
-  const channel = getChannelUsername(env);
-  const slotsBot = getSlotsBot(env);
-  const durakUrl = getDurakUrl(env);
+async function sendGroupRoast(env, chatId, fromUser, origin, isPrivate) {
+  if (!allowRate('roast:' + chatId, isPrivate ? 15000 : 120000)) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: '🔥 Микрофон ещё остывает после прошлой прожарки — подожди пару минут!',
+    });
+    return;
+  }
 
-  await tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text:
-      `🧟‍♂️ <b>Добро пожаловать в студию iField!</b>\n` +
-      `Выбирай, во что зарубиться прямо сейчас:\n\n` +
-      `🎛 <b>Зомби-Пульт</b> — живой бит-синтезатор, пады, озвучка треков и предложка тем.\n` +
-      `🎰 <b>Forest Fortune 5x5</b> — наши слоты в стиле Лас-Вегас.\n` +
-      `🃏 <b>Подкидной Дурак</b> — карточная битва студии.\n` +
-      `👥 Добавь меня в групповой чат — буду болтать с участниками, травить куплеты и звать играть!\n` +
-      `💬 Напиши сюда любую новость или идею — диджеи могут записать про неё трек!`,
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🎛 Открыть Зомби-Пульт со звуком', web_app: { url: `${origin}/` } }],
-        [
-          { text: '🎰 Слоты 5x5', url: `https://t.me/${slotsBot}` },
-          { text: '🃏 Подкидной Дурак', url: durakUrl },
+  const memKey = (isPrivate ? 'dm:' : 'grp:') + chatId;
+  const state = await getChatMem(env, memKey);
+  const participants = Array.from(new Set(state.msgs.map((m) => m.n))).filter(
+    (n) => n !== 'Zombie-DJ' && n !== 'Дядя Коля'
+  );
+  const fallbackName = (fromUser && (fromUser.first_name || fromUser.username)) || 'чат';
+  const listNames = participants.length ? participants.join(', ') : fallbackName;
+
+  try {
+    await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+    const aiRes = await callGeminiText(env, {
+      systemInstruction:
+        'Ты — Zombie-DJ. Напиши дерзкий, но добрый и смешной 6-строчный рэп-куплет (прожарку) про участников этого чата с учётом того, о чём они говорили. Без оскорблений и жести, только угар и харизма.',
+      prompt: 'Участники: ' + listNames + '\nКонтекст:\n' + state.msgs.map((m) => m.n + ': ' + m.t).join('\n'),
+      json: false,
+      thinkingLevel: 'LOW',
+    });
+
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: '🎤 <b>ПРОЖАРКА ЧАТА от Zombie-DJ:</b>\n\n<i>' + escapeHtml(aiRes.text.slice(0, 900)) + '</i>',
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '🔥 Ещё прожарку', callback_data: 'group_roast' },
+            { text: '🎮 Игры', callback_data: 'show_games' },
+          ],
         ],
-        [
-          { text: '🎲 Фишка студии', callback_data: 'menu:surprise' },
-          { text: '🍩 Печенье / Банкет', callback_data: 'menu:cookie' },
-        ],
-        [
-          { text: '🎮 Все проекты', callback_data: 'menu:projects' },
-          { text: `📢 ${channel}`, url: `https://t.me/${channel.replace(/^@/, '')}` },
-        ],
-      ],
-    },
-  });
-  if (isAdmin) {
-    await sendAdminMenu(env, chatId, origin);
+      },
+    });
+  } catch (err) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: '⚠️ Не удалось зачитать прожарку: ' + String(err.message || err).slice(0, 120),
+    });
   }
 }
 
-async function sendProjectsShowcase(env, chatId, origin, isPrivate = true) {
-  const slotsUrl = getSlotsUrl(env);
-  const slotsBot = getSlotsBot(env);
-  const rogerUrl = getRogerUrl(env);
-  const durakUrl = getDurakUrl(env);
-  const musicUrl = getMusicUrl(env);
-  const channel = getChannelUsername(env);
+async function sendGroupNews(env, chatId, origin, isPrivate) {
+  if (!allowRate('gnews:' + chatId, 180000)) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      text: '📰 Следующую горячую сводку можно вкинуть через 3 минуты.',
+    });
+    return;
+  }
 
-  const studioBtn = isPrivate
-    ? { text: '🎛 Звуковой Пульт', web_app: { url: `${origin}/` } }
-    : { text: '🎛 Звуковой Пульт', url: origin };
-
-  const slotsWebBtn = isPrivate
-    ? { text: '🎰 Слоты 5x5 (Веб)', web_app: { url: slotsUrl } }
-    : { text: '🎰 Слоты 5x5 (Бот)', url: `https://t.me/${slotsBot}` };
-
-  await tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text:
-      `🎮 <b>Витрина проектов студии iField</b>\n\n` +
-      `1. 🎛 <b>Zombie News Flava</b> — сатирический AI-эфир, бит-машина и предложка треков.\n` +
-      `2. 🎰 <b>Forest Fortune 5x5</b> — 25-барабанный неоновый слот.\n` +
-      `3. 🏴‍☠️ <b>Lucky Roger Slot</b> — пиратский слот.\n` +
-      `4. 🃏 <b>Подкидной Дурак</b> — карточный стол.\n` +
-      `5. 🎵 <b>iField Music Lab</b> — музыкальная лаборатория.`,
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [studioBtn],
-        [
-          slotsWebBtn,
-          { text: '🏴‍☠️ Lucky Roger', url: rogerUrl },
-        ],
-        [
-          { text: '🃏 Подкидной Дурак', url: durakUrl },
-          { text: '🎵 Music Lab', url: musicUrl },
-        ],
-        [
-          { text: '🍩 На печенье', callback_data: 'menu:cookie' },
-          { text: `📢 ${channel}`, url: `https://t.me/${channel.replace(/^@/, '')}` },
-        ],
-      ],
-    },
-  });
-}
-
-async function sendAdminMenu(env, chatId, origin) {
-  const studio = await getStudioState(env);
-  await tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text:
-      `🎛 <b>Панель продюсера</b>\n` +
-      `Режим крона (09:00 / 21:00 UTC): <b>${studio.mode === 'auto' ? 'Автопост в канал' : 'Черновик в ЛС'}</b>\n` +
-      `Выпусков: <b>${studio.totalPosts}</b> · Печенья: <b>${studio.cookiesTotal} ⭐</b>`,
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: '📝 Черновик сейчас', callback_data: 'adm:draft' },
-          { text: '🚀 Пост в канал', callback_data: 'adm:post' },
-        ],
-        [
-          { text: `⚙️ Режим: ${studio.mode === 'auto' ? 'Авто' : 'Черновик'}`, callback_data: 'adm:toggle_mode' },
-          { text: '📥 Предложка', callback_data: 'adm:inbox' },
-        ],
-        [
-          { text: '📊 Статус', callback_data: 'adm:status' },
-          { text: '🎛 Студия', web_app: { url: `${origin}/` } },
-        ],
-      ],
-    },
-  });
-}
-
-async function sendCookiePicker(env, chatId, origin, isPrivate = true) {
-  const studio = await getStudioState(env);
-  const bot = getBotUsername(env);
-
-  if (!isPrivate) {
+  const stats = await loadStats(env);
+  if (stats.lastTrack && stats.lastTrack.headline) {
+    const eco = getEcosystem(env);
     await tgCall(env, 'sendMessage', {
       chat_id: chatId,
       text:
-        `🍩 <b>Диджеям на печенье и банкет</b>\n` +
-        `Всего собрано: <b>${studio.cookiesTotal} ⭐</b> · Бесплатных: <b>${studio.freeCookies} 🍪</b>\n` +
-        `Жми кнопку ниже — открою кассу в ЛС без лишних окон в группе!`,
+        '📻 <b>Из свежей ленты @' + eco.channelUser + ':</b>\n\n' +
+        '<b>' + escapeHtml(stats.lastTrack.headline) + '</b>\n\n' +
+        '<i>' + escapeHtml(stats.lastTrack.lyrics || '') + '</i>\n\n' +
+        '💬 Что думаете, народ? Или лучше в карты?',
       parse_mode: 'HTML',
       reply_markup: {
-        inline_keyboard: [[{ text: '🍩 Угостить в боте (Stars)', url: `https://t.me/${bot}?start=cookie` }]],
+        inline_keyboard: [
+          [
+            { text: '🃏 В Дурака', url: eco.projects[1].url },
+            { text: '📢 Весь канал', url: eco.channelUrl },
+          ],
+        ],
       },
     });
     return;
   }
 
+  await tgCall(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+  await runNewsEdition(env, { force: true, targetChat: chatId, saveLast: false });
+}
+
+async function sendGamesMenu(env, chatId, isPrivate, origin) {
+  const eco = getEcosystem(env);
+  const rows = [
+    [
+      { text: '🌲 ' + eco.projects[0].name, url: eco.projects[0].url },
+      { text: '🃏 ' + eco.projects[1].name, url: eco.projects[1].url },
+    ],
+    [
+      { text: '🏴‍☠️ ' + eco.projects[2].name, url: eco.projects[2].url },
+      { text: '🎛 ' + eco.projects[3].name, url: eco.projects[3].url },
+    ],
+  ];
+  if (isPrivate) {
+    rows.push([{ text: '🎙 Открыть Zombie Студию', web_app: { url: origin + '/' } }]);
+  } else {
+    rows.push([{ text: '🎙 Студия в боте', url: eco.botUrl }]);
+  }
+
+  await tgCall(env, 'sendMessage', {
+    chat_id: chatId,
+    text: '🎮 <b>Игры и проекты экосистемы i-Field:</b>\nВыбирай, во что влетаем прямо сейчас!',
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: rows },
+  });
+}
+
+async function sendCookieMenu(env, chatId, isPrivate, origin) {
+  const eco = getEcosystem(env);
+  const buttons = [
+    [
+      { text: '🍪 50 ⭐', callback_data: 'cookie_buy:cookie_50' },
+      { text: '🍪 150 ⭐', callback_data: 'cookie_buy:cookie_150' },
+      { text: '🍪 500 ⭐', callback_data: 'cookie_buy:cookie_500' },
+    ],
+    [{ text: '🥂 Банкет диджеям · 10 000 ⭐', callback_data: 'cookie_buy:banquet_10000' }],
+  ];
+  if (isPrivate) {
+    buttons.push([{ text: '🎛 Открыть Банкет в Студии', web_app: { url: origin + '/' } }]);
+  } else {
+    buttons.push([{ text: '🎛 Зайти в Студию', url: eco.botUrl }]);
+  }
+
   await tgCall(env, 'sendMessage', {
     chat_id: chatId,
     text:
-      `🍩 <b>Диджеям на печенье и банкет</b>\n` +
-      `Выбери угощение Stars ниже или открой <b>Зомби-Пульт</b>, чтобы поддержать студию в одно касание без лишних сообщений в чате.\n\n` +
-      `Всего собрано: <b>${studio.cookiesTotal} ⭐</b> · Бесплатных печенек: <b>${studio.freeCookies} 🍪</b>`,
+      '🍩 <b>Угостить Zombie-DJ и Дядю Колю</b>\n' +
+      'Выбери размер подгона — звёзды улетят в ночную смену студии:',
     parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: '🍪 50 ⭐', callback_data: 'buy:cookie_50' },
-          { text: '🍩 150 ⭐', callback_data: 'buy:cookie_150' },
-          { text: '👑 500 ⭐', callback_data: 'buy:cookie_500' },
-        ],
-        [{ text: '🥂 Накрыть диджеям банкет · 10 000 ⭐', callback_data: 'buy:banquet_10000' }],
-        [{ text: '🎛 Открыть в Mini App', web_app: { url: `${origin}/?tab=cookie` } }],
-      ],
-    },
+    reply_markup: { inline_keyboard: buttons },
   });
 }
 
-async function sendStatusMessage(env, chatId) {
-  const studio = await getStudioState(env);
-  const inbox = await getInbox(env);
-  await tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text:
-      `📊 <b>Статус студии</b>\n` +
-      `Workers AI: ${env.AI ? '✅ подключен' : '⚠️ нет [ai] binding'}\n` +
-      `KV: ${env.NEWS_KV ? '✅ подключен' : '⚠️ нет NEWS_KV'}\n` +
-      `Gemini: ${env.GEMINI_API_KEY ? '✅ ключ задан' : '⚠️ нет ключа'}\n` +
-      `Озвучка TTS: ${env.VOICE_ENABLED === 'false' ? '⏸ выкл' : '🔊 авто (Gemini TTS)'}\n` +
-      `Режим крона: <b>${studio.mode === 'auto' ? 'Автопост' : 'Черновик'}</b>\n` +
-      `Выпусков: <b>${studio.totalPosts}</b>\n` +
-      `Stars на печенье: <b>${studio.cookiesTotal} ⭐</b> (${studio.cookiesCount} донат.)\n` +
-      `Бесплатных печенек: <b>${studio.freeCookies} 🍪</b>\n` +
-      `В предложке: <b>${inbox.length}</b> тем`,
-    parse_mode: 'HTML',
+// ---------------- NEWS PIPELINE (CHANNEL / DRAFT) ----------------
+
+async function runNewsEdition(env, opts) {
+  const targetChat = (opts && opts.targetChat) || env.TELEGRAM_CHAT_ID;
+  if (!targetChat || !env.TELEGRAM_BOT_TOKEN) {
+    return { ok: false, error: 'Missing TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN' };
+  }
+  if (!env.GEMINI_API_KEY) {
+    return { ok: false, error: 'Missing GEMINI_API_KEY' };
+  }
+
+  const categories = Object.keys(RSS_SOURCES);
+  const startCat = categories[Math.floor(Math.random() * categories.length)];
+  const orderedCats = [startCat].concat(categories.filter((c) => c !== startCat));
+
+  let postedUrls = [];
+  if (env.NEWS_KV) {
+    postedUrls = (await env.NEWS_KV.get('posted_urls', 'json')) || [];
+  }
+
+  let picked = null;
+  for (const cat of orderedCats) {
+    const items = await fetchCategoryItems(cat);
+    const fresh = items.find((it) => it.link && !postedUrls.includes(it.link));
+    if (fresh) {
+      picked = { ...fresh, cat };
+      break;
+    }
+    if (!picked && items.length > 0 && opts && opts.force) {
+      picked = { ...items[0], cat };
+    }
+  }
+
+  if (!picked) {
+    return { ok: false, error: 'Не удалось получить свежую новость из источников' };
+  }
+
+  const sys =
+    'Ты — сатирическая музыкальная AI-редакция Zombie News Flava.\n' +
+    'На основе новости сочини короткий, хлесткий музыкальный выпуск.\n' +
+    'Чередуй ведущих: "Zombie-DJ" (уличный неон-рэп, 4–6 ритмичных строк) и "Дядя Коля Мертвец" (ироничный кибер-шансон на ржавой гитаре, 4–6 строк).\n' +
+    'Верни СТРОГО JSON:\n' +
+    '{"persona":"Zombie-DJ"|"Дядя Коля Мертвец","format":"РЭП-СВОДКА"|"КИБЕР-ШАНСОН","headline":"короткий яркий заголовок до 85 символов","lyrics":"4-6 строк куплета без хештегов","punchline":"финальная колкая фраза до 110 символов","imagePrompt":"vivid English prompt for cinematic neon street cover art matching the news, no text inside image"}';
+
+  const geminiRes = await callGeminiText(env, {
+    systemInstruction: sys,
+    prompt: 'Категория: ' + picked.cat + '\nЗаголовок: ' + picked.title + '\nТекст: ' + picked.desc,
+    json: true,
+    thinkingLevel: 'LOW',
   });
-}
 
-async function sendInboxMessage(env, chatId) {
-  const inbox = await getInbox(env);
-  if (!inbox.length) {
-    await tgCall(env, 'sendMessage', { chat_id: chatId, text: '📥 Предложка пока пуста.' });
-    return;
-  }
-  const lines = inbox.slice(0, 8).map((x, i) => `${i + 1}. <b>${escapeHtml(x.author)}</b>: ${escapeHtml(x.text)}`);
-  await tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text: `📥 <b>Темы от слушателей (${inbox.length})</b>:\n\n${lines.join('\n')}`,
-    parse_mode: 'HTML',
-  });
-}
-
-/* ---------------- News Pipeline, Gemini & Workers AI ---------------- */
-
-async function runNewsCycle(env, opts = {}) {
-  const studio = await getStudioState(env);
-  const isPreview = Boolean(opts.preview || (opts.source === 'cron' && studio.mode === 'draft'));
-
-  const pickedStyle = STYLES.includes(opts.style)
-    ? opts.style
-    : pickNextStyle(studio);
-
-  const pickedCategory = CATEGORIES.includes(opts.category)
-    ? opts.category
-    : pickNextCategory(studio);
-
-  try {
-    let story = null;
-    const inbox = await getInbox(env);
-    if (inbox.length > 0 && (studio.totalPosts % 3 === 2 || opts.source === 'manual_inbox')) {
-      const reqItem = inbox.shift();
-      await saveInbox(env, inbox);
-      story = {
-        id: `inbox:${reqItem.id}`,
-        title: reqItem.text,
-        summary: `Заказ от слушателя ${reqItem.author}`,
-        source: `Предложка (${reqItem.author})`,
-        link: `https://t.me/${getBotUsername(env)}`,
-        category: pickedCategory,
-        fromInbox: true,
-      };
-    }
-
-    if (!story) {
-      story = await fetchFreshStory(env, pickedCategory, studio.seenIds || []);
-      if (!story) {
-        for (const altCat of CATEGORIES) {
-          if (altCat === pickedCategory) continue;
-          story = await fetchFreshStory(env, altCat, studio.seenIds || []);
-          if (story) break;
-        }
-      }
-    }
-
-    if (!story) {
-      if (env.ADMIN_CHAT_ID) {
-        await tgCall(env, 'sendMessage', {
-          chat_id: env.ADMIN_CHAT_ID,
-          text: '⚠️ Не удалось получить свежую новость из RSS-лент. Попробуй позже.',
-        });
-      }
-      return;
-    }
-
-    const track = await generateTrackWithGemini(env, story, pickedStyle);
-    const [imgBytes, voiceBytes] = await Promise.all([
-      generateCoverImage(env, env.AI ? track.imagePrompt : null, track.imagePrompt),
-      tryGenerateVoiceWithGemini(env, track, pickedStyle),
-    ]);
-
-    const postRecord = {
-      id: crypto.randomUUID().slice(0, 8),
-      storyId: story.id,
-      style: pickedStyle,
-      category: story.category,
-      headline: track.headline,
-      lyrics: track.lyrics,
-      punchline: track.punchline,
-      source: story.source,
-      sourceUrl: story.link,
-      imagePrompt: track.imagePrompt,
-      ts: Date.now(),
-      reactions: { fire: 0, skull: 0, rock: 0 },
-    };
-
-    if (isPreview && env.ADMIN_CHAT_ID) {
-      const sent = await sendPostMessage(env, env.ADMIN_CHAT_ID, postRecord, imgBytes, {
-        isDraft: true,
-      });
-      const photoFileId = sent?.result?.photo?.slice(-1)?.[0]?.file_id || null;
-      let audioFileId = null;
-      if (voiceBytes && voiceBytes.byteLength > 1024) {
-        const audioSent = await sendTrackAudio(env, env.ADMIN_CHAT_ID, postRecord, voiceBytes);
-        audioFileId = audioSent?.result?.audio?.file_id || null;
-      }
-      if (env.NEWS_KV) {
-        await env.NEWS_KV.put(
-          `draft:${postRecord.id}`,
-          JSON.stringify({ ...postRecord, photoFileId, audioFileId }),
-          { expirationTtl: 86400 }
-        );
-      }
-      return;
-    }
-
-    await publishPostToChannel(env, postRecord, imgBytes, voiceBytes);
-  } catch (err) {
-    if (env.ADMIN_CHAT_ID) {
-      await tgCall(env, 'sendMessage', {
-        chat_id: env.ADMIN_CHAT_ID,
-        text: `⚠️ Ошибка выпуска:\n<code>${escapeHtml((err?.message || String(err)).slice(0, 1200))}</code>`,
-        parse_mode: 'HTML',
-      }).catch(() => {});
-    }
-  }
-}
-
-async function publishPostToChannel(env, postRecord, imgBytes = null, voiceBytes = null) {
-  const channel = getChannelUsername(env);
-  const sent = await sendPostMessage(env, channel, postRecord, imgBytes, { isDraft: false });
-  if (!sent?.ok) {
-    throw new Error(`Telegram send failed: ${sent?.description || 'unknown'}`);
+  const track = parseJsonSafe(geminiRes.text);
+  if (!track || !track.lyrics) {
+    return { ok: false, error: 'Gemini не вернул корректный выпуск' };
   }
 
-  if (postRecord.audioFileId) {
-    await tgCall(env, 'sendAudio', {
-      chat_id: channel,
-      audio: postRecord.audioFileId,
-      title: postRecord.headline.slice(0, 60),
-      performer: STYLE_LABELS[postRecord.style] || 'Zombie News Flava',
-    }).catch(() => {});
-  } else if (voiceBytes && voiceBytes.byteLength > 1024) {
-    await sendTrackAudio(env, channel, postRecord, voiceBytes).catch(() => {});
-  }
-
-  const msgId = sent?.result?.message_id;
-  const cleanChannel = channel.replace(/^@/, '');
-  const tgUrl = msgId ? `https://t.me/${cleanChannel}/${msgId}` : `https://t.me/${cleanChannel}`;
-
-  const studio = await getStudioState(env);
-  studio.totalPosts = (studio.totalPosts || 0) + 1;
-  studio.lastStyle = postRecord.style;
-  studio.lastCategory = postRecord.category;
-  studio.seenIds = [postRecord.storyId, ...(studio.seenIds || [])].slice(0, 80);
-  studio.recentPosts = [
-    {
-      id: postRecord.id,
-      style: postRecord.style,
-      category: postRecord.category,
-      headline: postRecord.headline,
-      lyrics: postRecord.lyrics,
-      punchline: postRecord.punchline,
-      source: postRecord.source,
-      tgUrl,
-      ts: postRecord.ts,
-      reactions: { fire: 0, skull: 0, rock: 0 },
-    },
-    ...(studio.recentPosts || []),
-  ].slice(0, 8);
-  await saveStudioState(env, studio);
-}
-
-async function sendPostMessage(env, chatId, post, imgBytes, { isDraft }) {
-  const botUsername = getBotUsername(env);
-  const styleTitle = STYLE_LABELS[post.style] || post.style;
-  const catTitle = CATEGORY_LABELS[post.category] || post.category;
-
-  const safeHeadline = escapeHtml(String(post.headline || '').slice(0, 100));
-  const safeLyrics = escapeHtml(String(post.lyrics || '').slice(0, 620));
-  const safePunch = escapeHtml(String(post.punchline || '').slice(0, 130));
-  const safeSource = escapeHtml(String(post.source || '').slice(0, 48));
+  const headline = String(track.headline || picked.title).slice(0, 100);
+  const lyrics = String(track.lyrics).slice(0, 620);
+  const punchline = String(track.punchline || '').slice(0, 130);
+  const persona = String(track.persona || 'Zombie-DJ').slice(0, 32);
+  const format = String(track.format || 'РЭП-СВОДКА').slice(0, 32);
+  const sourceHost = safeHost(picked.link).slice(0, 48);
 
   const caption =
-    `${styleTitle} · ${catTitle}\n\n` +
-    `<b>${safeHeadline}</b>\n\n` +
-    `${safeLyrics}\n\n` +
-    `💬 <i>${safePunch}</i>\n` +
-    `📰 Источник: ${safeSource}`;
+    '🎙 <b>' + escapeHtml(persona) + ' · ' + escapeHtml(format) + '</b>\n\n' +
+    '<b>' + escapeHtml(headline) + '</b>\n\n' +
+    '<i>' + escapeHtml(lyrics) + '</i>\n\n' +
+    (punchline ? '💥 ' + escapeHtml(punchline) + '\n\n' : '') +
+    '🗞 Источник: ' + escapeHtml(sourceHost);
 
-  const reply_markup = isDraft
-    ? {
-        inline_keyboard: [
-          [
-            { text: '✅ В канал', callback_data: `pub:${post.id}` },
-            { text: '🔄 Переписать', callback_data: `regen:${post.id}` },
-            { text: '🗑 Отмена', callback_data: `drop:${post.id}` },
-          ],
-        ],
-      }
-    : {
-        inline_keyboard: [
-          [
-            { text: '🍩 Печенье и банкет', url: `https://t.me/${botUsername}?start=cookie` },
-            { text: '🎛 Пульт и игры', url: `https://t.me/${botUsername}?start=studio` },
-          ],
-        ],
-      };
+  const imgBytes = await generateCoverImage(env, track.imagePrompt || picked.title);
+  const eco = getEcosystem(env);
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: '🎛 Слушать в Студии', url: eco.botUrl },
+        { text: '🎮 Игры', url: eco.projects[0].url },
+      ],
+    ],
+  };
 
-  if (post.photoFileId) {
-    return tgCall(env, 'sendPhoto', {
-      chat_id: chatId,
-      photo: post.photoFileId,
-      caption,
+  let tgRes;
+  if (imgBytes) {
+    tgRes = await tgSendPhotoBytes(env, targetChat, imgBytes, caption, replyMarkup);
+  } else {
+    tgRes = await tgCall(env, 'sendMessage', {
+      chat_id: targetChat,
+      text: caption,
       parse_mode: 'HTML',
-      reply_markup,
+      reply_markup: replyMarkup,
     });
   }
 
-  if (imgBytes && imgBytes.byteLength > 512) {
-    const form = new FormData();
-    form.append('chat_id', String(chatId));
-    form.append('caption', caption);
-    form.append('parse_mode', 'HTML');
-    form.append('reply_markup', JSON.stringify(reply_markup));
-    form.append('photo', new Blob([imgBytes], { type: 'image/png' }), 'cover.png');
-    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+  if (!tgRes.ok) {
+    return { ok: false, error: tgRes.description || 'Telegram send error' };
+  }
+
+  if (env.VOICE_ENABLED === 'true') {
+    const audioWav = await tryGenerateVoice(env, headline + '. ' + lyrics, persona);
+    if (audioWav) {
+      await tgSendAudioBytes(env, targetChat, audioWav, persona + ' — ' + headline);
+    }
+  }
+
+  if (env.NEWS_KV && opts && opts.saveLast !== false) {
+    const nextPosted = [picked.link].concat(postedUrls.filter((u) => u !== picked.link)).slice(0, 60);
+    await env.NEWS_KV.put('posted_urls', JSON.stringify(nextPosted));
+    await updateStats(env, (s) => {
+      s.lastTrack = {
+        persona,
+        format,
+        headline,
+        lyrics,
+        punchline,
+        source: sourceHost,
+        ts: Date.now(),
+      };
+    });
+  }
+
+  return { ok: true, headline, persona };
+}
+
+async function fetchCategoryItems(cat) {
+  const urls = RSS_SOURCES[cat] || RSS_SOURCES.world;
+  const out = [];
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, {
+        headers: { 'User-Agent': 'ZombieNewsFlava/1.0' },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (!resp.ok) continue;
+      if (url.endsWith('.json') || url.includes('.json?')) {
+        const j = await resp.json();
+        const kids = (j && j.data && j.data.children) || [];
+        for (const c of kids) {
+          if (c && c.data && c.data.title && c.data.url) {
+            out.push({ title: c.data.title, link: c.data.url, desc: '' });
+          }
+        }
+      } else {
+        const xml = await resp.text();
+        const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || xml.match(/<entry\b[\s\S]*?<\/entry>/gi) || [];
+        for (const block of items.slice(0, 8)) {
+          const title = stripXml(extractTag(block, 'title'));
+          const link = stripXml(extractTag(block, 'link')) || extractAttr(block, 'link', 'href');
+          const desc = stripXml(extractTag(block, 'description') || extractTag(block, 'summary')).slice(0, 400);
+          if (title && link) out.push({ title, link, desc });
+        }
+      }
+      if (out.length > 0) break;
+    } catch (_) {}
+  }
+  return out;
+}
+
+// ---------------- GEMINI & WORKERS AI ----------------
+
+async function callGeminiText(env, opts) {
+  if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY не задан');
+
+  const models = [];
+  if (env.GEMINI_MODEL) models.push(env.GEMINI_MODEL);
+  for (const m of GEMINI_TEXT_MODELS) {
+    if (!models.includes(m)) models.push(m);
+  }
+
+  let lastErr = 'Unknown Gemini error';
+
+  for (const model of models) {
+    const endpoint =
+      'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+
+    const baseBody = {
+      contents: [{ role: 'user', parts: [{ text: opts.prompt }] }],
+    };
+    if (opts.systemInstruction) {
+      baseBody.systemInstruction = { parts: [{ text: opts.systemInstruction }] };
+    }
+
+    const genCfg = {};
+    if (opts.json) genCfg.responseMimeType = 'application/json';
+    if (model.startsWith('gemini-4-') && opts.thinkingLevel) {
+      genCfg.thinkingConfig = { thinkingLevel: opts.thinkingLevel };
+    }
+
+    const payload = Object.keys(genCfg).length ? { ...baseBody, generationConfig: genCfg } : baseBody;
+
+    let res = await fetch(endpoint, {
       method: 'POST',
-      body: form,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(12000),
     });
-    return r.json();
+
+    if (res.status === 400 && Object.keys(genCfg).length > 0) {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify(baseBody),
+        signal: AbortSignal.timeout(12000),
+      });
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      const parts = (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+      const text = parts.map((p) => p.text || '').join('').trim();
+      if (text) return { text, model };
+      lastErr = model + ': empty response';
+      continue;
+    }
+
+    const errText = await res.text();
+    lastErr = model + ' (' + res.status + '): ' + errText.slice(0, 140);
   }
 
-  return tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    text: caption,
-    parse_mode: 'HTML',
-    disable_web_page_preview: true,
-    reply_markup,
-  });
+  throw new Error(lastErr);
 }
 
-async function sendTrackAudio(env, chatId, post, wavBytes) {
-  const form = new FormData();
-  form.append('chat_id', String(chatId));
-  form.append('title', (post.headline || 'Zombie Track').slice(0, 60));
-  form.append('performer', STYLE_LABELS[post.style] || 'Zombie News Flava');
-  form.append('caption', '🎙 Голосовая озвучка выпуска');
-  form.append('audio', new Blob([wavBytes], { type: 'audio/wav' }), 'track.wav');
-  const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendAudio`, {
-    method: 'POST',
-    body: form,
-  });
-  return r.json();
-}
-
-async function tryGenerateVoiceWithGemini(env, track, style) {
-  if (env.VOICE_ENABLED === 'false') return null;
-  const apiKey = (env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) return null;
+async function generateCoverImage(env, prompt) {
+  if (!env.AI) return null;
+  const fullPrompt = 'Editorial neon street art illustration, moody lighting, high contrast, no text: ' + String(prompt).slice(0, 240);
+  try {
+    const out = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+      prompt: fullPrompt,
+      steps: 4,
+    });
+    if (out && out.image) {
+      return base64ToBytes(out.image);
+    }
+    if (out instanceof ReadableStream || out instanceof Uint8Array || out instanceof ArrayBuffer) {
+      return new Uint8Array(out instanceof ReadableStream ? await new Response(out).arrayBuffer() : out);
+    }
+  } catch (_) {}
 
   try {
-    const voiceName = style === 'chanson' ? 'Charon' : 'Fenrir';
-    const speakText = `${track.headline}. ${track.lyrics}`.slice(0, 520);
+    const out2 = await env.AI.run('@cf/bytedance/stable-diffusion-xl-lightning', { prompt: fullPrompt });
+    return new Uint8Array(out2 instanceof ReadableStream ? await new Response(out2).arrayBuffer() : out2);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function tryGenerateVoice(env, text, persona) {
+  if (!env.GEMINI_API_KEY) return null;
+  try {
+    const voiceName = persona.includes('Коля') ? 'Charon' : 'Fenrir';
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_TTS_MODEL)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_TTS_MODEL + ':generateContent',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': env.GEMINI_API_KEY,
+        },
         body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: speakText }] }],
+          contents: [{ role: 'user', parts: [{ text: String(text).slice(0, 480) }] }],
           generationConfig: {
             responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName },
-              },
-            },
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
           },
         }),
+        signal: AbortSignal.timeout(10000),
       }
     );
     if (!res.ok) return null;
     const data = await res.json();
-    const b64 = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!b64) return null;
-    return base64ToArrayBuffer(b64);
-  } catch {
+    const parts = (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+    const inline = parts.find((p) => p.inlineData && p.inlineData.data);
+    if (!inline) return null;
+    const pcm = base64ToBytes(inline.inlineData.data);
+    return pcm16ToWav(pcm, 24000);
+  } catch (_) {
     return null;
   }
 }
 
-async function fetchFreshStory(env, category, seenIds) {
-  const feedsByCategory = {
-    weird: [
-      { name: 'Oddity Central', url: 'https://www.odditycentral.com/feed' },
-      { name: 'Reddit r/nottheonion', url: 'https://www.reddit.com/r/nottheonion/hot.json?limit=12', type: 'reddit' },
-    ],
-    crypto: [
-      { name: 'ForkLog', url: 'https://forklog.com/feed/' },
-      { name: 'CoinTelegraph', url: 'https://cointelegraph.com/rss' },
-    ],
-    showbiz: [
-      { name: 'TMZ', url: 'https://www.tmz.com/rss.xml' },
-      { name: 'Variety', url: 'https://variety.com/feed/' },
-    ],
-    tech: [
-      { name: 'Habr', url: 'https://habr.com/ru/rss/articles/?fl=ru' },
-      { name: 'Hacker News', url: 'https://hnrss.org/frontpage' },
-    ],
-  };
+// ---------------- STATS & HELPERS ----------------
 
-  const feeds = feedsByCategory[category] || feedsByCategory.weird;
-  const seen = new Set(seenIds);
-
-  for (const feed of feeds) {
-    try {
-      const res = await fetch(feed.url, {
-        headers: { 'User-Agent': USER_AGENT },
-        signal: AbortSignal.timeout(4500),
-      });
-      if (!res.ok) continue;
-
-      if (feed.type === 'reddit') {
-        const json = await res.json();
-        const posts = (json?.data?.children || []).map((c) => c.data).filter((d) => d && !d.stickied && d.title);
-        for (const p of posts) {
-          const id = `rd:${p.id}`;
-          if (!seen.has(id)) {
-            return {
-              id,
-              title: p.title,
-              summary: (p.selftext || '').slice(0, 280),
-              source: feed.name,
-              link: `https://reddit.com${p.permalink}`,
-              category,
-            };
-          }
-        }
-        continue;
-      }
-
-      const xml = await res.text();
-      const items = parseRssItems(xml);
-      for (const item of items) {
-        if (feed.name === 'Hacker News' && !/(ai|gpt|robot|apple|crypto|hack|space|quantum|chip|cyber)/i.test(item.title)) {
-          continue;
-        }
-        const id = `rss:${simpleHash(item.link || item.title)}`;
-        if (!seen.has(id)) {
-          return {
-            id,
-            title: item.title,
-            summary: item.desc.slice(0, 320),
-            source: feed.name,
-            link: item.link,
-            category,
-          };
-        }
-      }
-    } catch {}
-  }
-
-  return null;
-}
-
-async function callGeminiJson(env, prompt, schema) {
-  const apiKey = (env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) throw new Error('Не задан GEMINI_API_KEY в Cloudflare Secrets');
-
-  const models = [];
-  if (env.GEMINI_MODEL && env.GEMINI_MODEL.trim()) {
-    models.push(env.GEMINI_MODEL.trim());
-  }
-  for (const m of GEMINI_MODELS) {
-    if (!models.includes(m)) models.push(m);
-  }
-
-  const errors = [];
-  let saw404 = false;
-
-  for (const model of models) {
-    for (const useSchema of [true, false]) {
-      const payload = {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: useSchema
-          ? { responseMimeType: 'application/json', responseSchema: schema }
-          : { responseMimeType: 'application/json' },
-      };
-
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      if (!res.ok) {
-        const errText = await res.text();
-        if (res.status === 404) saw404 = true;
-        errors.push(`${model} (${res.status}): ${errText.slice(0, 220)}`);
-        if (res.status === 400 && useSchema) continue;
-        break;
-      }
-
-      const data = await res.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const parsed = extractJsonObject(rawText);
-      if (parsed) return parsed;
-      errors.push(`${model}: не удалось разобрать JSON ответа`);
-    }
-  }
-
-  if (saw404) {
-    try {
-      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        const names = (listData.models || [])
-          .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-          .map((m) => m.name.replace(/^models\//, ''))
-          .slice(0, 12);
-        errors.push(`Доступные модели ключа: ${names.join(', ') || 'нет'}`);
-      }
-    } catch {}
-  }
-
-  throw new Error(`Gemini не ответил:\n${errors.join('\n')}`);
-}
-
-async function generateTrackWithGemini(env, story, style) {
-  const personaGuide = style === 'rap'
-    ? 'Ты — дерзкий уличный рэпер Zombie-DJ из кибер-подворотни. Пиши 8–10 ритмичных строк с плотными рифмами, уличным юмором и сатирой.'
-    : style === 'chanson'
-    ? 'Ты — Дядя Коля Мертвец, ветеран неоновых рюмочных. Пиши 8–10 душевных ироничных строк в духе кибер-шансона под гитару (про судьбу, провода, общак и абсурд).'
-    : 'Устрой короткий рэп-баттл (8–10 строк): 4 строки читает Zombie-DJ (🎤), потом 4–5 строк отвечает Дядя Коля Мертвец (🎸).';
-
-  const prompt =
-    `${personaGuide}\n` +
-    `Новость (${story.source}): "${story.title}".\n` +
-    `Контекст: ${story.summary || 'без доп. деталей'}.\n\n` +
-    `Верни СТРОГО JSON с полями:\n` +
-    `- headline: цепляющий заголовок на русском до 75 символов\n` +
-    `- lyrics: текст трека на русском (8-10 строк через \\n, без мата, но остро и смешно)\n` +
-    `- punchline: одна финальная колкая фраза-вывод до 100 символов\n` +
-    `- imagePrompt: детальный промпт на английском для обложки (dark underground cyberpunk illustration, vivid lighting, without any text or letters on the image)`;
-
-  const parsed = await callGeminiJson(env, prompt, {
-    type: 'OBJECT',
-    properties: {
-      headline: { type: 'STRING' },
-      lyrics: { type: 'STRING' },
-      punchline: { type: 'STRING' },
-      imagePrompt: { type: 'STRING' },
-    },
-    required: ['headline', 'lyrics', 'punchline', 'imagePrompt'],
-  });
-
-  if (!parsed?.headline || !parsed?.lyrics) {
-    throw new Error('Gemini вернул неполный трек');
-  }
-
-  return {
-    headline: String(parsed.headline).slice(0, 100),
-    lyrics: String(parsed.lyrics).slice(0, 620),
-    punchline: String(parsed.punchline || 'Такие новости на трезвую голову не читаются.').slice(0, 130),
-    imagePrompt: String(parsed.imagePrompt || `cyberpunk zombie dj radio studio neon art about ${story.title}`),
-  };
-}
-
-async function generateCoverImage(env, prompt, fallbackPrompt) {
-  if (!env.AI || !prompt) return null;
-  const cleanPrompt = `${prompt || fallbackPrompt}, high contrast stylized album cover art, no text, no watermark`.slice(0, 420);
-
-  for (const model of WORKERS_AI_IMAGE_MODELS) {
-    try {
-      const out = await env.AI.run(model, { prompt: cleanPrompt, num_steps: 4 });
-      if (!out) continue;
-      if (out instanceof ReadableStream) {
-        return await new Response(out).arrayBuffer();
-      }
-      if (out instanceof ArrayBuffer) return out;
-      if (ArrayBuffer.isView(out)) return out.buffer;
-      if (typeof out.image === 'string') {
-        return base64ToArrayBuffer(out.image);
-      }
-    } catch {}
-  }
-  return null;
-}
-
-/* ---------------- State & Helpers ---------------- */
-
-async function getStudioState(env) {
-  const def = {
-    mode: 'auto',
-    totalPosts: 0,
-    lastStyle: 'battle',
-    lastCategory: 'tech',
-    cookiesTotal: 0,
-    cookiesCount: 0,
+async function loadStats(env) {
+  const now = Date.now();
+  if (RAM_STATS.data && now - RAM_STATS.ts < 30000) return RAM_STATS.data;
+  const fallback = {
     freeCookies: 0,
-    seenIds: [],
-    recentPosts: [],
-    votes: { rap: 0, chanson: 0, battle: 0 },
+    paidCookies: 0,
+    starsTotal: 0,
+    banquets: 0,
+    reacts: { fire: 0, zombie: 0, guitar: 0 },
+    lastTrack: null,
   };
-  if (!env.NEWS_KV) return def;
-  const saved = await env.NEWS_KV.get('state:studio', 'json');
-  if (saved) {
-    return {
-      ...def,
-      ...saved,
-      votes: { ...def.votes, ...(saved.votes || {}) },
-      recentPosts: Array.isArray(saved.recentPosts) ? saved.recentPosts : [],
-      seenIds: Array.isArray(saved.seenIds) ? saved.seenIds : [],
-    };
+  if (!env.NEWS_KV) return fallback;
+  const loaded = (await env.NEWS_KV.get('stats', 'json')) || {};
+  const merged = {
+    ...fallback,
+    ...loaded,
+    reacts: { ...fallback.reacts, ...(loaded.reacts || {}) },
+  };
+  RAM_STATS.data = merged;
+  RAM_STATS.ts = now;
+  return merged;
+}
+
+async function updateStats(env, mutator) {
+  const current = await loadStats(env);
+  const next = JSON.parse(JSON.stringify(current));
+  mutator(next);
+  RAM_STATS.data = next;
+  RAM_STATS.ts = Date.now();
+  if (env.NEWS_KV) {
+    await env.NEWS_KV.put('stats', JSON.stringify(next));
   }
-  const legacy = await env.NEWS_KV.get('state:history', 'json');
-  if (legacy) {
-    return {
-      ...def,
-      mode: legacy.mode || 'auto',
-      totalPosts: legacy.totalPosts || 0,
-      cookiesTotal: legacy.cookiesTotal || 0,
-      cookiesCount: legacy.cookiesCount || 0,
-      seenIds: Array.isArray(legacy.seenIds) ? legacy.seenIds : [],
-    };
-  }
-  return def;
+  return next;
 }
 
-async function saveStudioState(env, state) {
-  if (!env.NEWS_KV) return;
-  await env.NEWS_KV.put('state:studio', JSON.stringify(state));
-}
-
-async function addStarsCookie(env, stars) {
-  const studio = await getStudioState(env);
-  studio.cookiesTotal = (studio.cookiesTotal || 0) + Number(stars || 0);
-  studio.cookiesCount = (studio.cookiesCount || 0) + 1;
-  await saveStudioState(env, studio);
-  return studio;
-}
-
-async function getInbox(env) {
-  if (!env.NEWS_KV) return [];
-  const data = await env.NEWS_KV.get('state:inbox', 'json');
-  return Array.isArray(data) ? data : [];
-}
-
-async function saveInbox(env, items) {
-  if (!env.NEWS_KV) return;
-  await env.NEWS_KV.put('state:inbox', JSON.stringify(items));
-}
-
-async function checkRateLimit(env, key, ttlSeconds, maxHits) {
-  if (!env.NEWS_KV) return true;
-  const raw = await env.NEWS_KV.get(key);
-  const count = Number(raw || 0);
-  if (count >= maxHits) return false;
-  await env.NEWS_KV.put(key, String(count + 1), { expirationTtl: Math.max(60, ttlSeconds) });
+function allowRate(key, windowMs) {
+  const now = Date.now();
+  const prev = RAM_RATE.get(key) || 0;
+  if (now - prev < windowMs) return false;
+  if (RAM_RATE.size > 400) RAM_RATE.clear();
+  RAM_RATE.set(key, now);
   return true;
 }
 
-function pickNextStyle(studio) {
-  const votes = studio.votes || {};
-  const maxVote = Math.max(votes.rap || 0, votes.chanson || 0, votes.battle || 0);
-  if (maxVote >= 3) {
-    const winner = STYLES.find((s) => (votes[s] || 0) === maxVote);
-    if (winner) return winner;
-  }
-  const idx = STYLES.indexOf(studio.lastStyle);
-  return STYLES[(idx + 1) % STYLES.length];
-}
-
-function pickNextCategory(studio) {
-  const idx = CATEGORIES.indexOf(studio.lastCategory);
-  return CATEGORIES[(idx + 1) % CATEGORIES.length];
-}
-
-async function getRunKey(env) {
-  if (env.RUN_SECRET) return env.RUN_SECRET.trim();
-  const seed = `${env.TELEGRAM_BOT_TOKEN || 'zombie'}:run_v2`;
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 24);
-}
-
-async function getWebhookSecret(env) {
-  if (env.TELEGRAM_WEBHOOK_SECRET) return env.TELEGRAM_WEBHOOK_SECRET.trim();
-  const seed = `${env.TELEGRAM_BOT_TOKEN || 'zombie'}:wh_v2`;
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 24);
-}
-
-function getBotUsername(env) {
-  return (env.BOT_USERNAME || DEFAULT_BOT).replace(/^@/, '').trim();
-}
-
-function getChannelUsername(env) {
-  const raw = (env.TELEGRAM_CHAT_ID || env.CHANNEL_USERNAME || DEFAULT_CHANNEL).trim();
-  return raw.startsWith('@') || raw.startsWith('-') ? raw : `@${raw}`;
-}
-
-function getSlotsUrl(env) {
-  return (env.SLOTS_URL || DEFAULT_SLOTS_URL).trim();
-}
-
-function getSlotsBot(env) {
-  return (env.SLOTS_BOT || DEFAULT_SLOTS_BOT).replace(/^@/, '').trim();
-}
-
-function getRogerUrl(env) {
-  return (env.ROGER_URL || DEFAULT_ROGER_URL).trim();
-}
-
-function getDurakUrl(env) {
-  return (env.DURAK_URL || DEFAULT_DURAK_URL).trim();
-}
-
-function getMusicUrl(env) {
-  return (env.MUSIC_URL || DEFAULT_MUSIC_URL).trim();
-}
-
-async function tgCall(env, method, payload) {
-  if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, description: 'Missing TELEGRAM_BOT_TOKEN' };
-  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+async function tgCall(env, method, body) {
+  if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, description: 'No token' };
+  const res = await fetch('https://api.telegram.org/bot' + env.TELEGRAM_BOT_TOKEN + '/' + method, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(9000),
   });
   return res.json();
 }
 
-function corsHeaders() {
-  return {
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, POST, OPTIONS',
-    'access-control-allow-headers': 'content-type',
-  };
+async function tgSendPhotoBytes(env, chatId, bytes, caption, replyMarkup) {
+  const fd = new FormData();
+  fd.append('chat_id', String(chatId));
+  fd.append('photo', new Blob([bytes], { type: 'image/png' }), 'cover.png');
+  fd.append('caption', caption);
+  fd.append('parse_mode', 'HTML');
+  if (replyMarkup) fd.append('reply_markup', JSON.stringify(replyMarkup));
+  const res = await fetch('https://api.telegram.org/bot' + env.TELEGRAM_BOT_TOKEN + '/sendPhoto', {
+    method: 'POST',
+    body: fd,
+    signal: AbortSignal.timeout(12000),
+  });
+  return res.json();
 }
 
-function jsonResponse(obj, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...extraHeaders,
-    },
+async function tgSendAudioBytes(env, chatId, wavBytes, title) {
+  const fd = new FormData();
+  fd.append('chat_id', String(chatId));
+  fd.append('audio', new Blob([wavBytes], { type: 'audio/wav' }), 'track.wav');
+  fd.append('title', title.slice(0, 60));
+  await fetch('https://api.telegram.org/bot' + env.TELEGRAM_BOT_TOKEN + '/sendAudio', {
+    method: 'POST',
+    body: fd,
+    signal: AbortSignal.timeout(12000),
   });
 }
 
-async function safeJson(request) {
+function pcm16ToWav(pcm, sampleRate) {
+  const wav = new Uint8Array(44 + pcm.length);
+  const v = new DataView(wav.buffer);
+  const writeStr = (off, s) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  v.setUint32(4, 36 + pcm.length, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  v.setUint32(40, pcm.length, true);
+  wav.set(pcm, 44);
+  return wav;
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function parseJsonSafe(raw) {
   try {
-    return await request.json();
-  } catch {
+    const cleaned = String(raw || '').replace(/```json|```/gi, '').trim();
+    const s = cleaned.indexOf('{');
+    const e = cleaned.lastIndexOf('}');
+    if (s === -1 || e <= s) return null;
+    return JSON.parse(cleaned.slice(s, e + 1));
+  } catch (_) {
     return null;
   }
 }
 
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+async function safeJson(req) {
+  try {
+    return await req.json();
+  } catch (_) {
+    return null;
+  }
 }
 
-function parseRssItems(xml) {
-  const items = [];
-  const itemMatches = xml.match(/<(item|entry)[\s\S]*?<\/\1>/gi) || [];
-  for (const block of itemMatches.slice(0, 12)) {
-    const title = decodeXml(extractTag(block, 'title'));
-    const link = decodeXml(extractTag(block, 'link') || extractAttr(block, 'link', 'href'));
-    const desc = decodeXml(extractTag(block, 'description') || extractTag(block, 'summary') || '');
-    if (title && link) {
-      items.push({
-        title: title.replace(/<[^>]+>/g, '').trim(),
-        link: link.trim(),
-        desc: desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
-      });
-    }
-  }
-  return items;
+function jsonResp(data, status) {
+  return new Response(JSON.stringify(data), {
+    status: status || 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function extractTag(xml, tag) {
-  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  if (!m) return '';
-  return m[1].replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/, '$1').trim();
-}
-
-function extractAttr(xml, tag, attr) {
-  const m = xml.match(new RegExp(`<${tag}[^>]*${attr}=["']([^"']+)["']`, 'i'));
+  const m = xml.match(new RegExp('<' + tag + '\\b[^>]*>([\\s\\S]*?)<\\/' + tag + '>', 'i'));
   return m ? m[1] : '';
 }
 
-function decodeXml(s) {
+function extractAttr(xml, tag, attr) {
+  const m = xml.match(new RegExp('<' + tag + '\\b[^>]*' + attr + '=["\']([^"\']+)["\']', 'i'));
+  return m ? m[1] : '';
+}
+
+function stripXml(s) {
   return String(s || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&quot;/g, '"')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'");
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function simpleHash(str) {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0).toString(36);
-}
-
-function extractJsonObject(text) {
-  const cleaned = String(text || '').replace(/```json|```/gi, '').trim();
+function safeHost(u) {
   try {
-    return JSON.parse(cleaned);
-  } catch {}
-  const m = cleaned.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try {
-    return JSON.parse(m[0]);
-  } catch {
-    return null;
+    return new URL(u).hostname.replace(/^www\./, '');
+  } catch (_) {
+    return 'news';
   }
 }
 
-function base64ToArrayBuffer(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
-}
+// ---------------- MINI APP HTML ----------------
 
-/* ---------------- Interactive Sound Studio Mini App HTML ---------------- */
-
-function renderHtml(cfg) {
-  const bot = escapeHtml(cfg.bot);
-  const channel = escapeHtml(cfg.channel);
-  const cleanChannel = channel.replace(/^@/, '');
-  const apiBase = escapeHtml(cfg.apiBase);
-  const slotsBot = escapeHtml(cfg.slotsBot);
-  const slotsUrl = escapeHtml(cfg.slotsUrl);
-  const rogerUrl = escapeHtml(cfg.rogerUrl);
-  const durakUrl = escapeHtml(cfg.durakUrl);
-  const musicUrl = escapeHtml(cfg.musicUrl);
+function renderHtml(env, stats) {
+  const eco = getEcosystem(env);
+  const initData = JSON.stringify({
+    stats,
+    projects: eco.projects,
+    channelUrl: eco.channelUrl,
+    channelUser: eco.channelUser,
+    botUrl: eco.botUrl,
+  }).replace(/</g, '\\u003c');
 
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>Zombie News Flava — Звуковая Студия</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>Zombie News Flava Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Outfit:wght@600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Outfit:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: #0b0d10;
-      --surface: #131720;
-      --surface-2: #191f2b;
-      --line: rgba(255, 255, 255, 0.08);
-      --text: #f3f6fa;
-      --muted: #9aa6b8;
-      --lime: #2ee58a;
-      --lime-ink: #071910;
-      --gold: #f5b74f;
-      --gold-ink: #221604;
-      --radius: 18px;
-      --safe-b: env(safe-area-inset-bottom, 0px);
+      --bg: #0a0e14;
+      --surface: #121822;
+      --surface-2: #18202d;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f3f6fb;
+      --muted: #93a1b5;
+      --accent: #22c55e;
+      --gold: #f59e0b;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body {
-      margin: 0;
-      padding: 0;
-      background: var(--bg);
-      color: var(--text);
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
       font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-      font-size: 15px;
-      line-height: 1.5;
-      overflow-x: hidden;
+      font-size: 15px; line-height: 1.5;
+      min-height: 100vh;
     }
-    .mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
-    h1, h2, h3 {
-      font-family: 'Outfit', sans-serif;
-      margin: 0;
-      text-wrap: balance;
-      letter-spacing: -0.01em;
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 16px 16px 96px;
     }
-    button, input, textarea { font-family: inherit; }
-
     .topbar {
-      position: sticky;
-      top: 0;
-      z-index: 30;
-      height: 52px;
-      padding: 0 16px;
-      background: rgba(11, 13, 16, 0.88);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
     }
     .brand {
       font-family: 'Outfit', sans-serif;
-      font-weight: 700;
-      font-size: 17px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      font-size: 20px; font-weight: 700; letter-spacing: -0.02em;
+      margin: 0;
     }
-    .brand span { color: var(--gold); }
-    .top-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-    .icon-btn {
-      min-height: 40px;
-      min-width: 44px;
-      padding: 0 12px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: var(--surface);
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 600;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: transform 0.15s cubic-bezier(0.16,1,0.3,1), border-color 0.15s;
+    .meta-line {
+      font-size: 12px; color: var(--muted); margin-top: 4px;
     }
-    .icon-btn:active { transform: scale(0.96); }
-    .icon-btn.sound-on { border-color: rgba(46,229,138,0.45); color: var(--lime); }
-    .icon-btn.gold-btn { background: var(--gold); color: var(--gold-ink); border-color: transparent; }
-
-    .wrap {
-      max-width: 1040px;
-      margin: 0 auto;
-      padding: 16px 16px calc(86px + var(--safe-b));
-    }
-    .hero {
-      padding: 8px 0 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .hero-meta { font-size: 13px; color: var(--muted); }
-    .hero h1 { font-size: clamp(26px, 6vw, 38px); line-height: 1.1; }
-    .hero p { margin: 0; color: var(--muted); max-width: 62ch; }
-    .hero-cta-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 4px;
-    }
-
     .btn {
-      min-height: 46px;
-      padding: 10px 18px;
-      border-radius: 14px;
-      border: 1px solid var(--line);
-      background: var(--surface);
-      color: var(--text);
-      font-weight: 600;
-      font-size: 14px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      text-decoration: none;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      min-height: 44px; padding: 10px 18px;
+      border-radius: 12px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text);
+      font-family: inherit; font-size: 14px; font-weight: 600;
+      text-decoration: none; cursor: pointer;
+      transition: transform 0.14s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.14s;
       white-space: nowrap;
-      transition: transform 0.15s cubic-bezier(0.16,1,0.3,1), opacity 0.15s;
     }
     .btn:active { transform: scale(0.97); }
-    .btn-primary { background: var(--lime); color: var(--lime-ink); border-color: transparent; }
-    .btn-gold { background: var(--gold); color: var(--gold-ink); border-color: transparent; }
-
-    .desktop-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 20px;
+    .btn-primary {
+      background: var(--accent); color: #04120a; border-color: transparent;
     }
-    @media (min-width: 880px) {
-      .wrap { padding-bottom: 32px; }
-      .desktop-grid {
-        grid-template-columns: 1.05fr 0.95fr;
-        align-items: start;
-      }
-      .bottom-nav { display: none !important; }
-      .tab-panel { display: block !important; }
+    .btn-gold {
+      background: var(--gold); color: #1a1002; border-color: transparent;
     }
-    .tab-panel { display: none; }
-    .tab-panel.active { display: block; }
-
+    .btn-full { width: 100%; }
+    .section { margin-top: 20px; }
     .card {
       background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      border-radius: 18px;
       padding: 18px;
     }
-    .card + .card { margin-top: 16px; }
-    .section-title { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
-    .section-sub { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
-
-    .seg {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      padding: 4px;
-      background: var(--bg);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      margin-bottom: 14px;
+    .card + .card { margin-top: 14px; }
+    h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 18px; font-weight: 600; margin: 0 0 8px;
     }
-    .seg button {
-      min-height: 44px;
-      border: 0;
-      border-radius: 10px;
-      background: transparent;
-      color: var(--muted);
-      font-weight: 600;
-      font-size: 13px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: background 0.15s, color 0.15s;
-    }
-    .seg button.active {
-      background: var(--surface-2);
+    p { margin: 0 0 12px; color: var(--muted); }
+    .lyrics {
+      white-space: pre-line;
       color: var(--text);
-      box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset;
+      font-size: 15px; line-height: 1.6;
+      padding: 14px 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      margin: 12px 0;
     }
-
-    .viz-wrap {
-      background: var(--bg);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 10px;
-      margin-bottom: 14px;
+    .row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .row > * { flex: 1 1 0; }
+    .num {
+      font-family: 'JetBrains Mono', monospace;
+      font-variant-numeric: tabular-nums;
     }
-    canvas#vizCanvas { width: 100%; height: 82px; display: block; }
-    .step-row {
-      display: grid;
-      grid-template-columns: repeat(8, 1fr);
-      gap: 6px;
-      margin-top: 8px;
+    .stats-strip {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+      margin-top: 12px;
     }
-    .step-cell {
-      height: 5px;
-      border-radius: 4px;
-      background: rgba(255,255,255,0.08);
-      transition: background 0.1s;
-    }
-    .step-cell.on { background: var(--lime); }
-
-    .transport-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    .play-btn {
-      flex: 1;
-      min-height: 48px;
-      border-radius: 14px;
-      border: 0;
-      background: var(--lime);
-      color: var(--lime-ink);
-      font-size: 15px;
-      font-weight: 700;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-    }
-    .play-btn.playing {
-      background: var(--surface-2);
-      color: var(--lime);
-      border: 1px solid rgba(46,229,138,0.4);
-    }
-    .bpm-box {
-      padding: 0 12px;
-      min-height: 48px;
-      border-radius: 14px;
-      background: var(--bg);
-      border: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      font-size: 13px;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-
-    .pads-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    .pad-btn {
-      min-height: 68px;
-      padding: 12px;
-      border-radius: 14px;
-      border: 1px solid var(--line);
-      background: var(--surface-2);
-      color: var(--text);
-      text-align: left;
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      transition: transform 0.12s cubic-bezier(0.16,1,0.3,1), border-color 0.12s;
-    }
-    .pad-btn:active, .pad-btn.hit {
-      transform: scale(0.96);
-      border-color: var(--lime);
-    }
-    .pad-name { font-weight: 700; font-size: 14px; }
-    .pad-hint { font-size: 12px; color: var(--muted); }
-
-    .poll-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-    }
-    .vote-btn {
-      min-height: 54px;
-      padding: 8px 6px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 2px;
-    }
-    .vote-btn.voted { border-color: var(--lime); color: var(--lime); }
-
-    .projects-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 10px;
-    }
-    .proj-row {
-      padding: 12px 14px;
-      border-radius: 14px;
-      background: var(--bg);
-      border: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .proj-info { min-width: 0; }
-    .proj-title { font-weight: 700; font-size: 14.5px; }
-    .proj-desc { font-size: 12.5px; color: var(--muted); }
-
-    .feed-item { padding: 14px 0; border-bottom: 1px solid var(--line); }
-    .feed-item:first-child { padding-top: 0; }
-    .feed-item:last-child { border-bottom: 0; padding-bottom: 0; }
-    .feed-meta { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    .feed-title { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
-    .feed-lyrics { font-size: 13.5px; color: #d6deea; white-space: pre-line; margin-bottom: 10px; }
-    .react-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .react-btns { display: flex; gap: 6px; flex-wrap: wrap; }
-    .react-chip {
-      min-height: 40px;
-      min-width: 50px;
-      padding: 0 10px;
-      border-radius: 10px;
-      border: 1px solid var(--line);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 13px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-    }
-    .react-chip.done { border-color: var(--lime); color: var(--lime); }
-
-    .field {
-      width: 100%;
-      min-height: 88px;
-      padding: 12px 14px;
-      border-radius: 14px;
-      border: 1px solid var(--line);
-      background: var(--bg);
-      color: var(--text);
-      font-size: 15px;
-      resize: vertical;
-      margin-bottom: 10px;
-    }
-    .field:focus { outline: none; border-color: var(--lime); }
-    .style-picks {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .style-picks button {
-      min-height: 44px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: var(--bg);
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .style-picks button.active {
-      border-color: var(--lime);
-      color: var(--text);
-      background: var(--surface-2);
-    }
-
-    .cookie-free-box {
-      padding: 14px;
-      border-radius: 14px;
-      background: var(--bg);
-      border: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    .packs-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .pack-btn {
-      min-height: 76px;
-      padding: 10px 8px;
-      border-radius: 14px;
-      border: 1px solid rgba(245, 183, 79, 0.35);
-      background: rgba(245, 183, 79, 0.08);
-      color: var(--text);
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      transition: transform 0.14s, background 0.14s;
-    }
-    .pack-btn:active { transform: scale(0.96); }
-    .pack-stars { font-weight: 700; color: var(--gold); font-size: 16px; }
-    .pack-label { font-size: 11.5px; color: var(--muted); text-align: center; }
-
-    .banquet-btn {
-      width: 100%;
-      min-height: 62px;
-      padding: 12px 16px;
-      border-radius: 14px;
-      border: 1px solid rgba(245, 183, 79, 0.7);
-      background: linear-gradient(135deg, rgba(245,183,79,0.22), rgba(46,229,138,0.12));
-      color: var(--text);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      transition: transform 0.14s;
-    }
-    .banquet-btn:active { transform: scale(0.98); }
-    .banquet-title { font-weight: 700; font-size: 15px; text-align: left; }
-    .banquet-sub { font-size: 12px; color: var(--muted); text-align: left; }
-    .banquet-price { font-weight: 700; color: var(--gold); font-size: 15px; white-space: nowrap; }
-
-    .bottom-nav {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: 40;
-      background: rgba(11, 13, 16, 0.92);
-      backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-      border-top: 1px solid var(--line);
-      padding-bottom: var(--safe-b);
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      height: calc(60px + var(--safe-b));
-    }
-    .nav-btn {
-      border: 0;
-      background: transparent;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 600;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 2px;
-      cursor: pointer;
-      min-height: 44px;
-    }
-    .nav-btn .ico { font-size: 19px; line-height: 1; }
-    .nav-btn.active { color: var(--lime); }
-
-    .toast {
-      position: fixed;
-      left: 50%;
-      bottom: calc(74px + var(--safe-b));
-      transform: translateX(-50%) translateY(16px);
-      background: #1d2430;
-      color: var(--text);
-      border: 1px solid rgba(255,255,255,0.14);
-      padding: 10px 16px;
-      border-radius: 12px;
-      font-size: 13.5px;
-      font-weight: 500;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s, transform 0.2s;
-      z-index: 60;
-      max-width: calc(100vw - 32px);
+    .stat-cell {
+      padding: 12px; border-radius: 14px; background: var(--surface-2);
       text-align: center;
     }
-    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-
-    @media (prefers-reduced-motion: reduce) {
-      * { transition: none !important; }
+    .stat-val { font-size: 20px; font-weight: 700; display: block; }
+    .stat-lbl { font-size: 12px; color: var(--muted); }
+    canvas#viz {
+      width: 100%; height: 64px; display: block;
+      background: #0b1018; border-radius: 12px;
+      margin: 12px 0;
+    }
+    .pad-grid {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
+      margin-top: 12px;
+    }
+    .project-list {
+      display: grid; grid-template-columns: 1fr; gap: 12px;
+    }
+    @media (min-width: 720px) {
+      .project-list { grid-template-columns: repeat(2, 1fr); }
+    }
+    .proj-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 16px; padding: 16px;
+      display: flex; flex-direction: column; justify-content: space-between; gap: 12px;
+    }
+    .proj-title { font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 600; color: var(--text); }
+    .proj-desc { font-size: 13px; color: var(--muted); }
+    input, textarea {
+      width: 100%; min-height: 44px; padding: 11px 14px;
+      border-radius: 12px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text);
+      font-family: inherit; font-size: 15px; outline: none;
+    }
+    input:focus, textarea:focus { border-color: var(--accent); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .bottom-nav {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+      background: rgba(12, 17, 25, 0.92);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--border);
+      padding: 6px 12px calc(6px + env(safe-area-inset-bottom));
+    }
+    .bottom-inner {
+      max-width: 960px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+    }
+    .nav-btn {
+      min-height: 48px; border: none; border-radius: 10px;
+      background: transparent; color: var(--muted);
+      font-family: inherit; font-size: 12px; font-weight: 600;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      cursor: pointer;
+    }
+    .nav-btn.active { color: var(--text); background: var(--surface-2); }
+    .toast {
+      position: fixed; left: 50%; bottom: 82px; transform: translateX(-50%);
+      background: #1f2937; color: var(--text); border: 1px solid var(--border);
+      padding: 10px 16px; border-radius: 12px; font-size: 13px; font-weight: 500;
+      display: none; z-index: 50; max-width: 90%; text-align: center;
     }
   </style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">Zombie News <span>Flava</span></div>
-    <div class="top-actions">
-      <button id="soundToggleBtn" class="icon-btn sound-on" type="button" aria-label="Переключить звук">
-        <span id="soundIcon">🔊</span><span>Звук</span>
-      </button>
-      <button id="topCookieBtn" class="icon-btn gold-btn" type="button">🍩 Печенье</button>
-    </div>
-  </header>
-
-  <main class="wrap">
-    <section class="hero">
-      <div class="hero-meta" id="heroMeta">Автоэфир в 09:00 и 21:00 UTC · Рэп и кибер-шансон</div>
-      <h1>Сатирическая звуковая студия в Telegram</h1>
-      <p>Крути живой бит, жми звуковые пады, включай голосовую читку прямо поверх ритма, закидывай темы и пробуй другие игры студии.</p>
-      <div class="hero-cta-row">
-        <button class="btn btn-primary" type="button" data-tg-link="https://t.me/${cleanChannel}">📢 Читать ${channel}</button>
-        <button class="btn btn-gold" type="button" id="heroCookieBtn">🍩 Печенье и банкет</button>
-        <button class="btn" type="button" data-tg-link="https://t.me/${slotsBot}">🎰 Слоты 5x5</button>
+  <div class="wrap">
+    <header class="topbar">
+      <div>
+        <h1 class="brand">Zombie News Flava</h1>
+        <div class="meta-line">Сатирическая AI-студия · @${escapeHtml(eco.channelUser)} · Свободный эфир</div>
       </div>
-    </section>
+      <a class="btn btn-primary" href="${escapeHtml(eco.channelUrl)}" target="_blank" rel="noopener">Канал</a>
+    </header>
 
-    <div class="desktop-grid">
-      <section class="tab-panel active" data-tab="deck">
+    <main class="section">
+      <!-- TAB 1: ЭФИР -->
+      <section id="tab-air" class="tab-pane active">
         <div class="card">
-          <div class="section-title">Живой пульт Zombie-DJ и Дяди Коли</div>
-          <div class="section-sub">Синтезатор работает прямо в браузере — без интернета и расхода лимитов.</div>
-
-          <div class="seg" role="tablist" aria-label="Выбор бита">
-            <button type="button" class="active" data-deck="rap">🎤 Zombie-DJ · 94 BPM</button>
-            <button type="button" data-deck="chanson">🎸 Дядя Коля · 108 BPM</button>
+          <div class="meta-line" id="track-meta">Последний выпуск студии</div>
+          <h2 id="track-title" style="margin-top:6px;">Загрузка эфира...</h2>
+          <div class="lyrics" id="track-lyrics"></div>
+          <p id="track-punch" style="color:var(--text);font-weight:500;"></p>
+          <div class="row">
+            <button class="btn btn-primary" id="btn-speak">🔊 Зачитать поверх бита</button>
+            <button class="btn" id="btn-beat-quick">🎵 Включить бит</button>
           </div>
-
-          <div class="viz-wrap">
-            <canvas id="vizCanvas" width="600" height="160"></canvas>
-            <div class="step-row" id="stepRow">
-              <div class="step-cell"></div><div class="step-cell"></div><div class="step-cell"></div><div class="step-cell"></div>
-              <div class="step-cell"></div><div class="step-cell"></div><div class="step-cell"></div><div class="step-cell"></div>
-            </div>
-          </div>
-
-          <div class="transport-row">
-            <button id="playBeatBtn" class="play-btn" type="button">▶ Запустить бит</button>
-            <div class="bpm-box mono"><span id="bpmLabel">94</span>&nbsp;BPM</div>
-          </div>
-
-          <div class="pads-grid">
-            <button class="pad-btn" type="button" data-pad="scratch">
-              <span class="pad-name">🎧 Скретч</span>
-              <span class="pad-hint">Виниловый запил</span>
-            </button>
-            <button class="pad-btn" type="button" data-pad="zombie">
-              <span class="pad-name">🧟‍♂️ Рык зомби</span>
-              <span class="pad-hint">Басовый гроул</span>
-            </button>
-            <button class="pad-btn" type="button" data-pad="horn">
-              <span class="pad-name">📯 Эйрхорн</span>
-              <span class="pad-hint">Клубный гудок</span>
-            </button>
-            <button class="pad-btn" type="button" data-pad="crunch">
-              <span class="pad-name">🍪 Хруст</span>
-              <span class="pad-hint">Вкусный бит-аккорд</span>
-            </button>
+          <div class="row" style="margin-top:10px;">
+            <button class="btn" onclick="sendReact('fire')">🔥 <span class="num" id="r-fire">0</span></button>
+            <button class="btn" onclick="sendReact('zombie')">🧟 <span class="num" id="r-zombie">0</span></button>
+            <button class="btn" onclick="sendReact('guitar')">🎸 <span class="num" id="r-guitar">0</span></button>
           </div>
         </div>
 
         <div class="card">
-          <div class="section-title">Выбор стиля следующего эфира</div>
-          <div class="section-sub">Лидер голосования задаст подачу для ближайшего выпуска в канале.</div>
-          <div class="poll-grid">
-            <button class="vote-btn" type="button" data-vote="rap">
-              <span>🎤 Рэп</span>
-              <span class="mono" id="voteRap">0</span>
-            </button>
-            <button class="vote-btn" type="button" data-vote="chanson">
-              <span>🎸 Шансон</span>
-              <span class="mono" id="voteChanson">0</span>
-            </button>
-            <button class="vote-btn" type="button" data-vote="battle">
-              <span>⚔️ Баттл</span>
-              <span class="mono" id="voteBattle">0</span>
-            </button>
+          <h2>Ведущие эфира</h2>
+          <p><strong>Zombie-DJ</strong> — уличный неон-рэп и острые панчи по горячим новостям.</p>
+          <p style="margin-bottom:0;"><strong>Дядя Коля Мертвец</strong> — ветеран кибер-шансона на ржавой гитаре. Добавь бота в свой чат, чтобы общаться с обоими вживую.</p>
+        </div>
+      </section>
+
+      <!-- TAB 2: ПУЛЬТ -->
+      <section id="tab-deck" class="tab-pane">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <h2 style="margin:0;">DJ-Пульт студии</h2>
+            <button class="btn" id="btn-mute" style="min-height:40px;padding:8px 14px;">Звук вкл</button>
+          </div>
+          <canvas id="viz" width="600" height="64"></canvas>
+          <div class="row">
+            <button class="btn btn-primary" id="btn-beat-zombie">🎤 Zombie-DJ · 94 BPM</button>
+            <button class="btn btn-gold" id="btn-beat-kolya">🎸 Дядя Коля · 108 BPM</button>
+          </div>
+          <div class="pad-grid">
+            <button class="btn" onclick="playPad('scratch')">🎧 Скретч</button>
+            <button class="btn" onclick="playPad('growl')">🧟 Рык зомби</button>
+            <button class="btn" onclick="playPad('horn')">📯 Эйрхорн</button>
+            <button class="btn" onclick="playPad('crunch')">🍪 Хруст</button>
           </div>
         </div>
 
         <div class="card">
-          <div class="section-title">Игры и проекты студии iField</div>
-          <div class="section-sub">Собрали всё в одном месте — запускай в один тап.</div>
-          <div class="projects-grid">
-            <div class="proj-row">
-              <div class="proj-info">
-                <div class="proj-title">🎰 Forest Fortune 5x5</div>
-                <div class="proj-desc">25-барабанный неоновый слот в стиле Вегаса</div>
-              </div>
-              <button class="btn btn-primary" type="button" id="openSlotsBtn">Играть</button>
-            </div>
-            <div class="proj-row">
-              <div class="proj-info">
-                <div class="proj-title">🃏 Подкидной Дурак</div>
-                <div class="proj-desc">Карточная битва студии</div>
-              </div>
-              <button class="btn" type="button" id="openDurakBtn">Играть</button>
-            </div>
-            <div class="proj-row">
-              <div class="proj-info">
-                <div class="proj-title">🏴‍☠️ Lucky Roger Slot</div>
-                <div class="proj-desc">Пиратский слот за сокровищами</div>
-              </div>
-              <button class="btn" type="button" id="openRogerBtn">Открыть</button>
-            </div>
-            <div class="proj-row">
-              <div class="proj-info">
-                <div class="proj-title">🎵 iField Music Lab</div>
-                <div class="proj-desc">Музыкальная лаборатория студии</div>
-              </div>
-              <button class="btn" type="button" id="openMusicBtn">Открыть</button>
-            </div>
+          <h2>Заказать тему выпуска</h2>
+          <p>Предложи новость или прикол — редакция заберёт её в следующий эфир.</p>
+          <input id="sug-input" type="text" maxlength="180" placeholder="О чём зачитать в следующем треке?" />
+          <div style="margin-top:10px;">
+            <button class="btn btn-primary btn-full" id="btn-sug">Отправить в редакцию</button>
           </div>
         </div>
       </section>
 
-      <div>
-        <section class="tab-panel" data-tab="feed">
-          <div class="card">
-            <div class="section-title">Последние выпуски канала</div>
-            <div class="section-sub">Оценивай панчи или жми «🔊 Зачитать», чтобы послушать поверх бита.</div>
-            <div id="feedList">
-              <div class="feed-meta">Загружаю свежие треки из студии...</div>
+      <!-- TAB 3: ИГРЫ -->
+      <section id="tab-games" class="tab-pane">
+        <div class="project-list" id="projects-grid"></div>
+      </section>
+
+      <!-- TAB 4: БАНКЕТ -->
+      <section id="tab-bank" class="tab-pane">
+        <div class="card">
+          <h2>Касса студии</h2>
+          <p>Поддержи ночную смену Zombie-DJ и Дяди Коли бесплатным тапом или Telegram Stars.</p>
+          <div class="stats-strip">
+            <div class="stat-cell">
+              <span class="stat-val num" id="s-cookies">0</span>
+              <span class="stat-lbl">Печенек</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-val num" id="s-stars">0</span>
+              <span class="stat-lbl">Звёзд</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-val num" id="s-banquets">0</span>
+              <span class="stat-lbl">Банкетов</span>
             </div>
           </div>
-        </section>
-
-        <section class="tab-panel" data-tab="suggest">
-          <div class="card">
-            <div class="section-title">Предложка: закажи трек диджеям</div>
-            <div class="section-sub">Смешная новость, крипта или ситуация из жизни — лучшие темы уходят в выпуск.</div>
-            <textarea id="suggestText" class="field" maxlength="180" placeholder="Например: Кот случайно запустил майнинг-ферму и согрел весь подъезд..."></textarea>
-            <div class="style-picks" id="suggestStyles">
-              <button type="button" class="active" data-sstyle="auto">🎲 Авто</button>
-              <button type="button" data-sstyle="rap">🎤 Рэп</button>
-              <button type="button" data-sstyle="chanson">🎸 Шансон</button>
-            </div>
-            <button id="suggestBtn" class="btn btn-primary" style="width:100%" type="button">Отправить тему в студию</button>
+          <div style="margin-top:14px;">
+            <button class="btn btn-full" id="btn-free-cookie">🍪 Угостить бесплатно (+1)</button>
           </div>
-        </section>
+        </div>
 
-        <section class="tab-panel" data-tab="cookie" id="cookieSection">
-          <div class="card">
-            <div class="section-title">🍩 Диджеям на печенье и банкет</div>
-            <div class="section-sub">Оплата Stars открывается прямо здесь поверх приложения, не засоряя чат.</div>
-
-            <div class="cookie-free-box">
-              <div>
-                <div style="font-weight:700">Бесплатная печенька</div>
-                <div class="feed-meta">Угощено: <span class="mono" id="freeCookieCount">0</span> 🍪</div>
-              </div>
-              <button id="freeCookieBtn" class="btn btn-primary" type="button">Кинуть 🍪</button>
-            </div>
-
-            <div class="section-sub" style="margin-bottom:8px">
-              Реальные звёзды на поддержку студии · Собрано <span class="mono" id="starsTotal">0</span> ⭐
-            </div>
-            <div class="packs-grid">
-              <button class="pack-btn" type="button" data-pack="cookie_50">
-                <span class="pack-stars">50 ⭐</span>
-                <span class="pack-label">Хрустящая печенька</span>
-              </button>
-              <button class="pack-btn" type="button" data-pack="cookie_150">
-                <span class="pack-stars">150 ⭐</span>
-                <span class="pack-label">Коробка печенья</span>
-              </button>
-              <button class="pack-btn" type="button" data-pack="cookie_500">
-                <span class="pack-stars">500 ⭐</span>
-                <span class="pack-label">VIP-самовар</span>
-              </button>
-            </div>
-
-            <button class="banquet-btn" type="button" data-pack="banquet_10000">
-              <div>
-                <div class="banquet-title">🥂 Накрыть диджеям банкет!</div>
-                <div class="banquet-sub">Царский ужин на весь некро-район</div>
-              </div>
-              <span class="banquet-price mono">10 000 ⭐</span>
-            </button>
+        <div class="card">
+          <h2>Подогнать печенье в Stars</h2>
+          <div class="row">
+            <button class="btn" onclick="buyPack('cookie_50')">🍪 50 ⭐</button>
+            <button class="btn" onclick="buyPack('cookie_150')">🍪 150 ⭐</button>
+            <button class="btn" onclick="buyPack('cookie_500')">🍪 500 ⭐</button>
           </div>
-        </section>
-      </div>
+          <div style="margin-top:12px;">
+            <button class="btn btn-gold btn-full" onclick="buyPack('banquet_10000')">🥂 Накрыть диджеям банкет · 10 000 ⭐</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="bottom-nav">
+    <div class="bottom-inner">
+      <button class="nav-btn active" data-tab="tab-air" onclick="switchTab('tab-air', this)">📻<span>Эфир</span></button>
+      <button class="nav-btn" data-tab="tab-deck" onclick="switchTab('tab-deck', this)">🎛<span>Пульт</span></button>
+      <button class="nav-btn" data-tab="tab-games" onclick="switchTab('tab-games', this)">🎮<span>Игры</span></button>
+      <button class="nav-btn" data-tab="tab-bank" onclick="switchTab('tab-bank', this)">🍩<span>Банкет</span></button>
     </div>
-  </main>
-
-  <nav class="bottom-nav" aria-label="Навигация студии">
-    <button class="nav-btn active" type="button" data-nav="deck"><span class="ico">🎛</span><span>Пульт</span></button>
-    <button class="nav-btn" type="button" data-nav="feed"><span class="ico">📻</span><span>Эфир</span></button>
-    <button class="nav-btn" type="button" data-nav="suggest"><span class="ico">💡</span><span>Заказ</span></button>
-    <button class="nav-btn" type="button" data-nav="cookie"><span class="ico">🍩</span><span>Печенье</span></button>
   </nav>
 
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast"></div>
 
   <script>
-    (function () {
-      var API_BASE = '${apiBase}';
-      var BOT_USER = '${bot}';
-      var SLOTS_URL = '${slotsUrl}';
-      var SLOTS_BOT = '${slotsBot}';
-      var ROGER_URL = '${rogerUrl}';
-      var DURAK_URL = '${durakUrl}';
-      var MUSIC_URL = '${musicUrl}';
-      var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    var INIT = ${initData};
+    var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) {
+      try { tg.ready(); tg.expand(); } catch (e) {}
+    }
 
-      if (tg) {
-        try {
-          tg.ready();
-          tg.expand();
-          if (tg.setHeaderColor) tg.setHeaderColor('#0b0d10');
-          if (tg.setBackgroundColor) tg.setBackgroundColor('#0b0d10');
-        } catch (e) {}
+    var stateStats = INIT.stats || {};
+    var ac = null;
+    var analyser = null;
+    var masterGain = null;
+    var muted = false;
+    var beatMode = null;
+    var beatTimer = null;
+    var step = 0;
+    var freeQueue = 0;
+    var freeTimer = null;
+
+    function showToast(msg) {
+      var el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
+      clearTimeout(el._t);
+      el._t = setTimeout(function () { el.style.display = 'none'; }, 2400);
+    }
+
+    function switchTab(id, btn) {
+      var panes = document.querySelectorAll('.tab-pane');
+      for (var i = 0; i < panes.length; i++) panes[i].classList.remove('active');
+      var navs = document.querySelectorAll('.nav-btn');
+      for (var j = 0; j < navs.length; j++) navs[j].classList.remove('active');
+      document.getElementById(id).classList.add('active');
+      if (btn) btn.classList.add('active');
+    }
+
+    function renderStats() {
+      var s = stateStats || {};
+      var r = s.reacts || {};
+      var totalCookies = (s.freeCookies || 0) + (s.paidCookies || 0);
+      document.getElementById('s-cookies').textContent = String(totalCookies);
+      document.getElementById('s-stars').textContent = String(s.starsTotal || 0);
+      document.getElementById('s-banquets').textContent = String(s.banquets || 0);
+      document.getElementById('r-fire').textContent = String(r.fire || 0);
+      document.getElementById('r-zombie').textContent = String(r.zombie || 0);
+      document.getElementById('r-guitar').textContent = String(r.guitar || 0);
+
+      var t = s.lastTrack;
+      if (t && t.headline) {
+        document.getElementById('track-meta').textContent = (t.persona || 'Zombie-DJ') + ' · ' + (t.format || 'Эфир');
+        document.getElementById('track-title').textContent = t.headline;
+        document.getElementById('track-lyrics').textContent = t.lyrics || '';
+        document.getElementById('track-punch').textContent = t.punchline || '';
+      } else {
+        document.getElementById('track-title').textContent = 'Студия готова к эфиру';
+        document.getElementById('track-lyrics').textContent =
+          'Каждый день в 09:00 и 21:00 UTC бот забирает свежие мировые новости и превращает их в сатирический рэп и кибер-шансон.\\n\\nЖми «Включить бит» или переходи в «Пульт» и «Игры»!';
+        document.getElementById('track-punch').textContent = '';
       }
+    }
 
-      if (navigator.audioSession) {
+    function renderProjects() {
+      var grid = document.getElementById('projects-grid');
+      var list = INIT.projects || [];
+      grid.innerHTML = '';
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        var card = document.createElement('div');
+        card.className = 'proj-card';
+        var top = document.createElement('div');
+        var title = document.createElement('div');
+        title.className = 'proj-title';
+        title.textContent = p.name;
+        var desc = document.createElement('div');
+        desc.className = 'proj-desc';
+        desc.textContent = p.desc;
+        top.appendChild(title);
+        top.appendChild(desc);
+
+        var link = document.createElement('a');
+        link.className = 'btn btn-primary';
+        link.textContent = p.cta || 'Открыть';
+        link.href = p.url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.onclick = function (url) {
+          return function (ev) {
+            if (tg && url.indexOf('https://t.me/') === 0 && tg.openTelegramLink) {
+              ev.preventDefault();
+              tg.openTelegramLink(url);
+            }
+          };
+        }(p.url);
+
+        card.appendChild(top);
+        card.appendChild(link);
+        grid.appendChild(card);
+      }
+    }
+
+    function ensureAudio() {
+      if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
         try { navigator.audioSession.type = 'playback'; } catch (e) {}
       }
-
-      function haptic(level) {
-        if (tg && tg.HapticFeedback) {
-          try { tg.HapticFeedback.impactOccurred(level || 'light'); } catch (e) {}
-        }
+      if (!ac) {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        ac = new Ctx();
+        masterGain = ac.createGain();
+        masterGain.gain.value = muted ? 0 : 0.7;
+        analyser = ac.createAnalyser();
+        analyser.fftSize = 64;
+        masterGain.connect(analyser);
+        analyser.connect(ac.destination);
+        drawViz();
       }
-
-      function showToast(msg) {
-        var el = document.getElementById('toast');
-        el.textContent = msg;
-        el.classList.add('show');
-        clearTimeout(showToast._t);
-        showToast._t = setTimeout(function () { el.classList.remove('show'); }, 2600);
+      if (ac.state === 'suspended') {
+        ac.resume();
       }
+    }
 
-      function openTg(url) {
-        haptic('light');
-        if (tg && tg.openTelegramLink && url.indexOf('https://t.me/') === 0) {
-          try { tg.openTelegramLink(url); return; } catch (e) {}
-        }
-        window.location.href = url;
+    function playTone(freq, dur, type, vol, slideTo) {
+      ensureAudio();
+      var now = ac.currentTime;
+      var osc = ac.createOscillator();
+      var g = ac.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, now);
+      if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, now + dur);
+      g.gain.setValueAtTime(vol || 0.25, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start(now);
+      osc.stop(now + dur);
+    }
+
+    function playNoise(dur, vol, hp) {
+      ensureAudio();
+      var len = Math.floor(ac.sampleRate * dur);
+      var buf = ac.createBuffer(1, len, ac.sampleRate);
+      var data = buf.getChannelData(0);
+      for (var i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      var src = ac.createBufferSource();
+      src.buffer = buf;
+      var filter = ac.createBiquadFilter();
+      filter.type = hp ? 'highpass' : 'bandpass';
+      filter.frequency.value = hp || 1200;
+      var g = ac.createGain();
+      g.gain.setValueAtTime(vol || 0.2, ac.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+      src.connect(filter);
+      filter.connect(g);
+      g.connect(masterGain);
+      src.start();
+    }
+
+    function playPad(kind) {
+      if (kind === 'scratch') {
+        playTone(440, 0.12, 'sawtooth', 0.22, 180);
+        setTimeout(function () { playTone(210, 0.14, 'sawtooth', 0.2, 520); }, 110);
+      } else if (kind === 'growl') {
+        playTone(95, 0.45, 'sawtooth', 0.28, 55);
+      } else if (kind === 'horn') {
+        playTone(392, 0.28, 'sawtooth', 0.22, 370);
+        playTone(494, 0.28, 'square', 0.14, 466);
+      } else if (kind === 'crunch') {
+        playNoise(0.11, 0.35, 1800);
       }
+    }
 
-      document.getElementById('openSlotsBtn').addEventListener('click', function () {
-        if (tg && tg.openTelegramLink) openTg('https://t.me/' + SLOTS_BOT);
-        else window.location.href = SLOTS_URL;
-      });
-      document.getElementById('openDurakBtn').addEventListener('click', function () {
-        openTg(DURAK_URL);
-      });
-      document.getElementById('openRogerBtn').addEventListener('click', function () {
-        openTg(ROGER_URL);
-      });
-      document.getElementById('openMusicBtn').addEventListener('click', function () {
-        openTg(MUSIC_URL);
-      });
-
-      var soundEnabled = true;
-      var audioCtx = null;
-      var masterGain = null;
-      var analyser = null;
-      var noiseBuffer = null;
-      var beatPlaying = false;
-      var beatTimer = null;
-      var stepIndex = 0;
-      var currentDeck = 'rap';
-
-      function ensureAudio() {
-        if (!soundEnabled) return null;
-        if (!audioCtx) {
-          var Ctx = window.AudioContext || window.webkitAudioContext;
-          if (!Ctx) return null;
-          audioCtx = new Ctx();
-          masterGain = audioCtx.createGain();
-          masterGain.gain.value = 0.72;
-          analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
-          masterGain.connect(analyser);
-          analyser.connect(audioCtx.destination);
-
-          var len = audioCtx.sampleRate * 0.5;
-          noiseBuffer = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
-          var data = noiseBuffer.getChannelData(0);
-          for (var i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-        }
-        if (audioCtx.state === 'suspended') {
-          audioCtx.resume().catch(function () {});
-        }
-        return audioCtx;
-      }
-
-      function playKick(t, freqStart, dur) {
-        var ctx = ensureAudio(); if (!ctx) return;
-        var osc = ctx.createOscillator();
-        var g = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freqStart || 135, t);
-        osc.frequency.exponentialRampToValueAtTime(42, t + (dur || 0.16));
-        g.gain.setValueAtTime(0.85, t);
-        g.gain.exponentialRampToValueAtTime(0.001, t + (dur || 0.22));
-        osc.connect(g); g.connect(masterGain);
-        osc.start(t); osc.stop(t + (dur || 0.24));
-      }
-
-      function playSnare(t, sharp) {
-        var ctx = ensureAudio(); if (!ctx || !noiseBuffer) return;
-        var src = ctx.createBufferSource();
-        src.buffer = noiseBuffer;
-        var flt = ctx.createBiquadFilter();
-        flt.type = sharp ? 'highpass' : 'bandpass';
-        flt.frequency.setValueAtTime(sharp ? 1900 : 1200, t);
-        var g = ctx.createGain();
-        g.gain.setValueAtTime(sharp ? 0.26 : 0.36, t);
-        g.gain.exponentialRampToValueAtTime(0.001, t + (sharp ? 0.08 : 0.16));
-        src.connect(flt); flt.connect(g); g.connect(masterGain);
-        src.start(t); src.stop(t + 0.18);
-      }
-
-      function playBass(t, freq, type, dur) {
-        var ctx = ensureAudio(); if (!ctx) return;
-        var osc = ctx.createOscillator();
-        var flt = ctx.createBiquadFilter();
-        var g = ctx.createGain();
-        osc.type = type || 'sawtooth';
-        osc.frequency.setValueAtTime(freq, t);
-        flt.type = 'lowpass';
-        flt.frequency.setValueAtTime(type === 'triangle' ? 950 : 420, t);
-        flt.frequency.exponentialRampToValueAtTime(160, t + dur);
-        g.gain.setValueAtTime(0.28, t);
-        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-        osc.connect(flt); flt.connect(g); g.connect(masterGain);
-        osc.start(t); osc.stop(t + dur + 0.02);
-      }
-
-      function playPadEffect(kind) {
-        var ctx = ensureAudio();
-        if (!ctx) return;
-        var t = ctx.currentTime;
-        if (kind === 'scratch') {
-          var osc = ctx.createOscillator();
-          var g = ctx.createGain();
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(620, t);
-          osc.frequency.exponentialRampToValueAtTime(110, t + 0.11);
-          osc.frequency.exponentialRampToValueAtTime(480, t + 0.21);
-          osc.frequency.exponentialRampToValueAtTime(85, t + 0.32);
-          g.gain.setValueAtTime(0.28, t);
-          g.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
-          osc.connect(g); g.connect(masterGain);
-          osc.start(t); osc.stop(t + 0.35);
-          playSnare(t + 0.02, true);
-        } else if (kind === 'zombie') {
-          var o1 = ctx.createOscillator();
-          var o2 = ctx.createOscillator();
-          var f = ctx.createBiquadFilter();
-          var gz = ctx.createGain();
-          o1.type = 'sawtooth'; o2.type = 'square';
-          o1.frequency.setValueAtTime(92, t);
-          o1.frequency.linearRampToValueAtTime(66, t + 0.45);
-          o2.frequency.setValueAtTime(95, t);
-          o2.frequency.linearRampToValueAtTime(63, t + 0.45);
-          f.type = 'bandpass'; f.Q.value = 4.5;
-          f.frequency.setValueAtTime(280, t);
-          f.frequency.linearRampToValueAtTime(520, t + 0.18);
-          f.frequency.linearRampToValueAtTime(210, t + 0.45);
-          gz.gain.setValueAtTime(0.4, t);
-          gz.gain.exponentialRampToValueAtTime(0.001, t + 0.48);
-          o1.connect(f); o2.connect(f); f.connect(gz); gz.connect(masterGain);
-          o1.start(t); o2.start(t); o1.stop(t + 0.5); o2.stop(t + 0.5);
-        } else if (kind === 'horn') {
-          var freqs = [392, 493.88, 587.33];
-          for (var i = 0; i < freqs.length; i++) {
-            var ho = ctx.createOscillator();
-            var hg = ctx.createGain();
-            ho.type = 'sawtooth';
-            ho.frequency.setValueAtTime(freqs[i], t);
-            hg.gain.setValueAtTime(0.14, t);
-            hg.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
-            ho.connect(hg); hg.connect(masterGain);
-            ho.start(t); ho.stop(t + 0.4);
-          }
-        } else if (kind === 'crunch') {
-          playSnare(t, true);
-          playSnare(t + 0.06, false);
-          playBass(t + 0.08, 523.25, 'triangle', 0.16);
-          playBass(t + 0.17, 659.25, 'triangle', 0.22);
-        } else if (kind === 'click') {
-          playBass(t, 420, 'sine', 0.05);
-        }
-      }
-
-      function speakTrackText(text, style) {
-        if (!window.speechSynthesis) {
-          showToast('Озвучка в браузере не поддерживается');
-          return;
-        }
-        try {
-          window.speechSynthesis.cancel();
-          var u = new SpeechSynthesisUtterance(text);
-          u.lang = 'ru-RU';
-          u.pitch = style === 'chanson' ? 0.85 : 0.72;
-          u.rate = style === 'chanson' ? 0.94 : 1.04;
-          window.speechSynthesis.speak(u);
-          showToast('🔊 Зачитываю трек...');
-        } catch (e) {
-          showToast('Не удалось включить голос');
-        }
-      }
-
-      function stepTick() {
-        var ctx = ensureAudio();
-        if (!ctx || !beatPlaying) return;
-        var t = ctx.currentTime + 0.02;
-        var s = stepIndex % 8;
-
-        var cells = document.querySelectorAll('#stepRow .step-cell');
-        for (var i = 0; i < cells.length; i++) {
-          cells[i].classList.toggle('on', i === s);
-        }
-
-        if (currentDeck === 'rap') {
-          var rapBass = [55, 0, 55, 0, 65.4, 0, 49, 61.7];
-          if (s === 0 || s === 3 || s === 5) playKick(t, 140, 0.2);
-          if (s === 2 || s === 6) playSnare(t, false);
-          playSnare(t, true);
-          if (rapBass[s]) playBass(t, rapBass[s], 'sawtooth', 0.22);
-        } else {
-          var chansonNotes = [220, 261.6, 329.6, 261.6, 196, 246.9, 293.7, 246.9];
-          if (s === 0 || s === 4) playKick(t, 110, 0.14);
-          if (s === 2 || s === 6) playSnare(t, false);
-          playBass(t, chansonNotes[s], 'triangle', 0.19);
-        }
-
-        stepIndex++;
-      }
-
-      function toggleBeat(forceState) {
-        var next = typeof forceState === 'boolean' ? forceState : !beatPlaying;
-        beatPlaying = next;
-        var btn = document.getElementById('playBeatBtn');
+    function toggleBeat(mode) {
+      ensureAudio();
+      if (beatMode === mode) {
         clearInterval(beatTimer);
-        if (beatPlaying) {
-          ensureAudio();
-          var bpm = currentDeck === 'rap' ? 94 : 108;
-          var ms = Math.round((60000 / bpm) / 2);
-          stepIndex = 0;
-          stepTick();
-          beatTimer = setInterval(stepTick, ms);
-          btn.textContent = '⏸ Пауза';
-          btn.classList.add('playing');
-        } else {
-          btn.textContent = '▶ Запустить бит';
-          btn.classList.remove('playing');
-          var cells = document.querySelectorAll('#stepRow .step-cell');
-          for (var i = 0; i < cells.length; i++) cells[i].classList.remove('on');
+        beatMode = null;
+        updateBeatButtons();
+        return;
+      }
+      clearInterval(beatTimer);
+      beatMode = mode;
+      step = 0;
+      var bpm = mode === 'kolya' ? 108 : 94;
+      var ms = Math.round(60000 / bpm / 2);
+      beatTimer = setInterval(function () {
+        if (muted) return;
+        var s = step % 8;
+        if (s === 0 || (mode === 'zombie' && s === 3) || (mode === 'kolya' && s === 4)) {
+          playTone(115, 0.18, 'sine', 0.45, 42);
+        }
+        if ((mode === 'zombie' && (s === 2 || s === 6)) || (mode === 'kolya' && (s === 2 || s === 5 || s === 7))) {
+          playNoise(0.12, 0.22, 1400);
+        }
+        if (s % 2 === 1) playNoise(0.04, 0.08, 5200);
+        if (mode === 'kolya' && (s === 0 || s === 4)) {
+          playTone(s === 0 ? 196 : 220, 0.22, 'triangle', 0.14, 165);
+        }
+        step++;
+      }, ms);
+      updateBeatButtons();
+    }
+
+    function updateBeatButtons() {
+      document.getElementById('btn-beat-zombie').textContent = beatMode === 'zombie' ? '⏹ Стоп · 94 BPM' : '🎤 Zombie-DJ · 94 BPM';
+      document.getElementById('btn-beat-kolya').textContent = beatMode === 'kolya' ? '⏹ Стоп · 108 BPM' : '🎸 Дядя Коля · 108 BPM';
+      document.getElementById('btn-beat-quick').textContent = beatMode ? '⏹ Остановить бит' : '🎵 Включить бит';
+    }
+
+    function drawViz() {
+      var canvas = document.getElementById('viz');
+      if (!canvas || !analyser) return;
+      var c2 = canvas.getContext('2d');
+      var buf = new Uint8Array(analyser.frequencyBinCount);
+      function frame() {
+        requestAnimationFrame(frame);
+        analyser.getByteFrequencyData(buf);
+        c2.fillStyle = '#0b1018';
+        c2.fillRect(0, 0, canvas.width, canvas.height);
+        var w = canvas.width / buf.length;
+        for (var i = 0; i < buf.length; i++) {
+          var h = Math.max(4, (buf[i] / 255) * (canvas.height - 8));
+          c2.fillStyle = i % 2 === 0 ? '#22c55e' : '#f59e0b';
+          c2.fillRect(i * w + 2, canvas.height - h, Math.max(4, w - 4), h);
         }
       }
+      frame();
+    }
 
-      var vizCanvas = document.getElementById('vizCanvas');
-      var vizCtx = vizCanvas.getContext('2d');
-      var freqArr = new Uint8Array(32);
-      var phase = 0;
-
-      function drawViz() {
-        var w = vizCanvas.width;
-        var h = vizCanvas.height;
-        vizCtx.clearRect(0, 0, w, h);
-
-        if (analyser && soundEnabled) {
-          analyser.getByteFrequencyData(freqArr);
-        } else {
-          freqArr.fill(0);
-        }
-
-        var bars = 24;
-        var gap = 6;
-        var bw = (w - gap * (bars - 1)) / bars;
-        phase += 0.05;
-
-        for (var i = 0; i < bars; i++) {
-          var v = freqArr[i] || 0;
-          var idle = 10 + Math.sin(phase + i * 0.45) * 6;
-          var bh = Math.max(8, (v > 4 ? (v / 255) * (h - 16) : idle));
-          var x = i * (bw + gap);
-          var y = h - bh;
-          vizCtx.fillStyle = v > 120 ? '#f5b74f' : '#2ee58a';
-          vizCtx.globalAlpha = v > 4 ? 0.92 : 0.35;
-          vizCtx.fillRect(x, y, bw, bh);
-        }
-        vizCtx.globalAlpha = 1;
-        requestAnimationFrame(drawViz);
-      }
-      requestAnimationFrame(drawViz);
-
-      function switchTab(tabName) {
-        haptic('light');
-        var navs = document.querySelectorAll('[data-nav]');
-        var panels = document.querySelectorAll('[data-tab]');
-        for (var i = 0; i < navs.length; i++) {
-          navs[i].classList.toggle('active', navs[i].getAttribute('data-nav') === tabName);
-        }
-        for (var j = 0; j < panels.length; j++) {
-          panels[j].classList.toggle('active', panels[j].getAttribute('data-tab') === tabName);
-        }
-        if (window.innerWidth >= 880 && tabName === 'cookie') {
-          var el = document.getElementById('cookieSection');
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }
-
-      var navBtns = document.querySelectorAll('[data-nav]');
-      for (var n = 0; n < navBtns.length; n++) {
-        navBtns[n].addEventListener('click', function () {
-          ensureAudio();
-          playPadEffect('click');
-          switchTab(this.getAttribute('data-nav'));
-        });
-      }
-
-      document.getElementById('topCookieBtn').addEventListener('click', function () {
-        ensureAudio();
-        playPadEffect('crunch');
-        switchTab('cookie');
-      });
-      document.getElementById('heroCookieBtn').addEventListener('click', function () {
-        ensureAudio();
-        playPadEffect('crunch');
-        switchTab('cookie');
-      });
-
-      var tgLinks = document.querySelectorAll('[data-tg-link]');
-      for (var tl = 0; tl < tgLinks.length; tl++) {
-        tgLinks[tl].addEventListener('click', function () {
-          openTg(this.getAttribute('data-tg-link'));
-        });
-      }
-
-      document.getElementById('soundToggleBtn').addEventListener('click', function () {
-        soundEnabled = !soundEnabled;
-        this.classList.toggle('sound-on', soundEnabled);
-        document.getElementById('soundIcon').textContent = soundEnabled ? '🔊' : '🔇';
-        if (!soundEnabled && beatPlaying) toggleBeat(false);
-        if (!soundEnabled && window.speechSynthesis) {
-          try { window.speechSynthesis.cancel(); } catch (e) {}
-        }
-        if (soundEnabled) {
-          ensureAudio();
-          playPadEffect('click');
-          showToast('Звук включён');
-        } else {
-          showToast('Звук выключен');
-        }
-      });
-
-      var deckBtns = document.querySelectorAll('[data-deck]');
-      for (var d = 0; d < deckBtns.length; d++) {
-        deckBtns[d].addEventListener('click', function () {
-          ensureAudio();
-          haptic('light');
-          currentDeck = this.getAttribute('data-deck');
-          for (var k = 0; k < deckBtns.length; k++) {
-            deckBtns[k].classList.toggle('active', deckBtns[k] === this);
-          }
-          document.getElementById('bpmLabel').textContent = currentDeck === 'rap' ? '94' : '108';
-          if (beatPlaying) toggleBeat(true);
-          else playPadEffect('click');
-        });
-      }
-
-      document.getElementById('playBeatBtn').addEventListener('click', function () {
-        if (!soundEnabled) {
-          soundEnabled = true;
-          document.getElementById('soundToggleBtn').classList.add('sound-on');
-          document.getElementById('soundIcon').textContent = '🔊';
-        }
-        ensureAudio();
-        haptic('medium');
-        toggleBeat();
-      });
-
-      var padBtns = document.querySelectorAll('[data-pad]');
-      for (var p = 0; p < padBtns.length; p++) {
-        padBtns[p].addEventListener('pointerdown', function () {
-          ensureAudio();
-          haptic('medium');
-          var el = this;
-          el.classList.add('hit');
-          setTimeout(function () { el.classList.remove('hit'); }, 140);
-          playPadEffect(el.getAttribute('data-pad'));
-        });
-      }
-
-      var votedStyle = localStorage.getItem('znf_style_vote') || '';
-
-      function renderStudio(data) {
-        if (!data) return;
-        document.getElementById('freeCookieCount').textContent = String(data.freeCookies || 0);
-        document.getElementById('starsTotal').textContent = String(data.cookiesTotal || 0);
-        var votes = data.votes || {};
-        document.getElementById('voteRap').textContent = String(votes.rap || 0);
-        document.getElementById('voteChanson').textContent = String(votes.chanson || 0);
-        document.getElementById('voteBattle').textContent = String(votes.battle || 0);
-
-        var vBtns = document.querySelectorAll('[data-vote]');
-        for (var i = 0; i < vBtns.length; i++) {
-          vBtns[i].classList.toggle('voted', vBtns[i].getAttribute('data-vote') === votedStyle);
-        }
-
-        renderFeed(data.recentPosts || []);
-      }
-
-      function renderFeed(posts) {
-        var box = document.getElementById('feedList');
-        if (!posts.length) {
-          box.innerHTML = '<div class="feed-meta">Скоро здесь появятся свежие треки из канала!</div>';
-          return;
-        }
-        box.innerHTML = '';
-        for (var i = 0; i < posts.length; i++) {
-          var post = posts[i];
-          var item = document.createElement('div');
-          item.className = 'feed-item';
-
-          var meta = document.createElement('div');
-          meta.className = 'feed-meta';
-          var stLabel = post.style === 'rap' ? 'Zombie-DJ' : (post.style === 'chanson' ? 'Дядя Коля' : 'Баттл');
-          meta.textContent = stLabel + ' · ' + (post.source || 'Эфир');
-
-          var title = document.createElement('div');
-          title.className = 'feed-title';
-          title.textContent = post.headline || 'Без названия';
-
-          var lyrics = document.createElement('div');
-          lyrics.className = 'feed-lyrics';
-          lyrics.textContent = post.lyrics || '';
-
-          var row = document.createElement('div');
-          row.className = 'react-row';
-
-          var btns = document.createElement('div');
-          btns.className = 'react-btns';
-          var reacts = [
-            { k: 'fire', ico: '🔥' },
-            { k: 'skull', ico: '💀' },
-            { k: 'rock', ico: '🎸' }
-          ];
-          for (var r = 0; r < reacts.length; r++) {
-            (function (postId, rk, ico) {
-              var b = document.createElement('button');
-              b.type = 'button';
-              b.className = 'react-chip';
-              var storeKey = 'znf_r_' + postId + '_' + rk;
-              if (localStorage.getItem(storeKey)) b.classList.add('done');
-              var count = (post.reactions && post.reactions[rk]) || 0;
-              b.innerHTML = '<span>' + ico + '</span><span class="mono">' + count + '</span>';
-              b.addEventListener('click', function () {
-                ensureAudio();
-                haptic('light');
-                if (localStorage.getItem(storeKey)) {
-                  showToast('Ты уже поставил эту реакцию');
-                  return;
-                }
-                localStorage.setItem(storeKey, '1');
-                playPadEffect('crunch');
-                fetch(API_BASE + '/api/react', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ kind: 'post', postId: postId, reaction: rk })
-                }).then(function (res) { return res.json(); }).then(function (j) {
-                  if (j.ok && j.recentPosts) renderFeed(j.recentPosts);
-                }).catch(function () {});
-              });
-              btns.appendChild(b);
-            })(post.id, reacts[r].k, reacts[r].ico);
-          }
-
-          var speakBtn = document.createElement('button');
-          speakBtn.type = 'button';
-          speakBtn.className = 'react-chip';
-          speakBtn.textContent = '🔊 Зачитать';
-          (function (pObj) {
-            speakBtn.addEventListener('click', function () {
-              ensureAudio();
-              haptic('light');
-              speakTrackText((pObj.headline || '') + '. ' + (pObj.lyrics || ''), pObj.style);
-            });
-          })(post);
-
-          var openBtn = document.createElement('button');
-          openBtn.type = 'button';
-          openBtn.className = 'react-chip';
-          openBtn.textContent = 'В канал ↗';
-          (function (url) {
-            openBtn.addEventListener('click', function () {
-              openTg(url || 'https://t.me/${cleanChannel}');
-            });
-          })(post.tgUrl);
-
-          btns.appendChild(speakBtn);
-          row.appendChild(btns);
-          row.appendChild(openBtn);
-          item.appendChild(meta);
-          item.appendChild(title);
-          item.appendChild(lyrics);
-          item.appendChild(row);
-          box.appendChild(item);
-        }
-      }
-
-      fetch(API_BASE + '/api/studio')
+    function sendReact(kind) {
+      fetch('/api/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: kind }),
+      })
         .then(function (r) { return r.json(); })
-        .then(renderStudio)
-        .catch(function () {
-          document.getElementById('feedList').innerHTML = '<div class="feed-meta">Не удалось загрузить ленту.</div>';
-        });
+        .then(function (d) {
+          if (d && d.stats) {
+            stateStats = d.stats;
+            renderStats();
+          }
+        })
+        .catch(function () {});
+    }
 
-      var voteBtns = document.querySelectorAll('[data-vote]');
-      for (var vb = 0; vb < voteBtns.length; vb++) {
-        voteBtns[vb].addEventListener('click', function () {
-          ensureAudio();
-          haptic('medium');
-          var st = this.getAttribute('data-vote');
-          if (votedStyle === st) {
-            showToast('Голос уже учтён');
+    function queueFreeCookie() {
+      playPad('crunch');
+      freeQueue += 1;
+      stateStats.freeCookies = (stateStats.freeCookies || 0) + 1;
+      renderStats();
+      clearTimeout(freeTimer);
+      freeTimer = setTimeout(function () {
+        var count = freeQueue;
+        freeQueue = 0;
+        if (count <= 0) return;
+        fetch('/api/free-cookie', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ count: count }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d && d.stats) {
+              stateStats = d.stats;
+              renderStats();
+            }
+          })
+          .catch(function () {});
+      }, 2000);
+    }
+
+    function buyPack(packId) {
+      showToast('Готовим счёт в Stars...');
+      fetch('/api/cookie-invoice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ packId: packId }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d || !d.ok || !d.invoiceUrl) {
+            showToast((d && d.error) || 'Не удалось создать счёт');
             return;
           }
-          votedStyle = st;
-          localStorage.setItem('znf_style_vote', st);
-          playPadEffect('crunch');
-          fetch(API_BASE + '/api/react', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ kind: 'vote', style: st })
-          }).then(function (r) { return r.json(); }).then(function (j) {
-            if (j.ok) {
-              document.getElementById('voteRap').textContent = String(j.votes.rap || 0);
-              document.getElementById('voteChanson').textContent = String(j.votes.chanson || 0);
-              document.getElementById('voteBattle').textContent = String(j.votes.battle || 0);
-              for (var k = 0; k < voteBtns.length; k++) {
-                voteBtns[k].classList.toggle('voted', voteBtns[k].getAttribute('data-vote') === votedStyle);
+          if (tg && tg.openInvoice) {
+            tg.openInvoice(d.invoiceUrl, function (status) {
+              if (status === 'paid') {
+                fetch('/api/cookie-confirm', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ nonce: d.nonce }),
+                })
+                  .then(function (r2) { return r2.json(); })
+                  .then(function (d2) {
+                    if (d2 && d2.stats) {
+                      stateStats = d2.stats;
+                      renderStats();
+                    }
+                    showToast('Спасибо! Студия заряжена!');
+                  });
+              } else if (status === 'cancelled') {
+                showToast('Оплата отменена');
               }
-              showToast('Голос за стиль принят!');
-            }
-          }).catch(function () {});
-        });
-      }
-
-      var suggestStyle = 'auto';
-      var sugStyleBtns = document.querySelectorAll('[data-sstyle]');
-      for (var sb = 0; sb < sugStyleBtns.length; sb++) {
-        sugStyleBtns[sb].addEventListener('click', function () {
-          ensureAudio();
-          playPadEffect('click');
-          suggestStyle = this.getAttribute('data-sstyle');
-          for (var k = 0; k < sugStyleBtns.length; k++) {
-            sugStyleBtns[k].classList.toggle('active', sugStyleBtns[k] === this);
-          }
-        });
-      }
-
-      document.getElementById('suggestBtn').addEventListener('click', function () {
-        ensureAudio();
-        haptic('medium');
-        var input = document.getElementById('suggestText');
-        var text = (input.value || '').trim();
-        if (text.length < 6) {
-          showToast('Напиши тему хотя бы от 6 символов');
-          return;
-        }
-        var author = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && (tg.initDataUnsafe.user.username || tg.initDataUnsafe.user.first_name)) || 'Слушатель';
-        var btn = this;
-        btn.disabled = true;
-        fetch(API_BASE + '/api/suggest', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: text, style: suggestStyle, author: author })
-        }).then(function (r) { return r.json(); }).then(function (j) {
-          btn.disabled = false;
-          if (j.ok) {
-            input.value = '';
-            playPadEffect('crunch');
-            showToast('Тема отправлена диджеям! В очереди: ' + j.queueSize);
+            });
           } else {
-            showToast(j.error || 'Не удалось отправить');
+            window.open(d.invoiceUrl, '_blank');
           }
-        }).catch(function () {
-          btn.disabled = false;
+        })
+        .catch(function () {
           showToast('Ошибка сети');
         });
-      });
+    }
 
-      var pendingCookies = 0;
-      var cookieFlushTimer = null;
-      document.getElementById('freeCookieBtn').addEventListener('click', function () {
-        ensureAudio();
-        haptic('medium');
-        playPadEffect('crunch');
-        var el = document.getElementById('freeCookieCount');
-        el.textContent = String((Number(el.textContent) || 0) + 1);
-        pendingCookies++;
-        clearTimeout(cookieFlushTimer);
-        cookieFlushTimer = setTimeout(function () {
-          var batch = pendingCookies;
-          pendingCookies = 0;
-          if (!batch) return;
-          fetch(API_BASE + '/api/free-cookie', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ count: batch })
-          }).then(function (r) { return r.json(); }).then(function (j) {
-            if (j.ok && typeof j.freeCookies === 'number') {
-              el.textContent = String(j.freeCookies);
-            }
-          }).catch(function () {});
-        }, 700);
-      });
+    document.getElementById('btn-beat-zombie').onclick = function () { toggleBeat('zombie'); };
+    document.getElementById('btn-beat-kolya').onclick = function () { toggleBeat('kolya'); };
+    document.getElementById('btn-beat-quick').onclick = function () { toggleBeat(beatMode || 'zombie'); };
+    document.getElementById('btn-mute').onclick = function () {
+      muted = !muted;
+      if (masterGain) masterGain.gain.value = muted ? 0 : 0.7;
+      this.textContent = muted ? 'Звук выкл' : 'Звук вкл';
+    };
+    document.getElementById('btn-free-cookie').onclick = queueFreeCookie;
 
-      var packBtns = document.querySelectorAll('[data-pack]');
-      for (var pk = 0; pk < packBtns.length; pk++) {
-        packBtns[pk].addEventListener('click', function () {
-          ensureAudio();
-          haptic('medium');
-          var packId = this.getAttribute('data-pack');
-          var btn = this;
-          btn.disabled = true;
-          showToast('Открываю Stars...');
-          fetch(API_BASE + '/api/cookie-invoice', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ pack: packId })
-          }).then(function (r) { return r.json(); }).then(function (j) {
-            btn.disabled = false;
-            if (!j.ok || !j.invoiceLink) {
-              showToast(j.error || 'Не удалось создать счёт');
-              return;
-            }
-            if (tg && tg.openInvoice) {
-              tg.openInvoice(j.invoiceLink, function (status) {
-                if (status === 'paid') {
-                  playPadEffect('horn');
-                  haptic('heavy');
-                  showToast(j.stars >= 10000 ? '🥂 Легендарный банкет доставлен!' : 'Спасибо! Печенье доставлено 🍩');
-                  fetch(API_BASE + '/api/cookie-confirm', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ nonce: j.nonce })
-                  }).then(function (cr) { return cr.json(); }).then(function (cj) {
-                    if (cj.ok && typeof cj.cookiesTotal === 'number') {
-                      document.getElementById('starsTotal').textContent = String(cj.cookiesTotal);
-                    }
-                  }).catch(function () {});
-                } else if (status === 'cancelled') {
-                  showToast('Оплата отменена');
-                } else {
-                  showToast('Статус оплаты: ' + status);
-                }
-              });
-            } else {
-              openTg('https://t.me/' + BOT_USER + '?start=cookie');
-            }
-          }).catch(function () {
-            btn.disabled = false;
-            showToast('Ошибка связи со студией');
-          });
-        });
+    document.getElementById('btn-speak').onclick = function () {
+      var title = document.getElementById('track-title').textContent;
+      var lyrics = document.getElementById('track-lyrics').textContent;
+      if (!('speechSynthesis' in window)) {
+        showToast('Озвучка не поддерживается браузером');
+        return;
       }
+      if (!beatMode) toggleBeat('zombie');
+      window.speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(title + '. ' + lyrics);
+      u.lang = 'ru-RU';
+      u.rate = 1.02;
+      window.speechSynthesis.speak(u);
+      showToast('Зачитываем выпуск поверх бита');
+    };
 
-      var qs = new URLSearchParams(window.location.search);
-      var startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
-      if (qs.get('tab') === 'cookie' || startParam === 'cookie') {
-        switchTab('cookie');
+    document.getElementById('btn-sug').onclick = function () {
+      var input = document.getElementById('sug-input');
+      var topic = (input.value || '').trim();
+      var author = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name) || 'Слушатель';
+      if (topic.length < 4) {
+        showToast('Напиши тему чуть подробнее');
+        return;
       }
-    })();
+      fetch('/api/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic, author: author }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.ok) {
+            input.value = '';
+            showToast('Тема отправлена в редакцию!');
+          } else {
+            showToast((d && d.error) || 'Попробуй позже');
+          }
+        })
+        .catch(function () { showToast('Ошибка сети'); });
+    };
+
+    renderStats();
+    renderProjects();
   </script>
 </body>
 </html>`;
